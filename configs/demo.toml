@@ -1,0 +1,27 @@
+mode = "multi"
+max_revisions = 1
+
+[data]
+source = "synthetic"
+stocks = 4
+sessions = 120
+seed = 7
+train_sessions = 70
+validation_sessions = 25
+horizons = [1, 3, 5]
+
+[llm]
+backend = "mock"
+max_output_tokens = 4096
+
+[execution]
+# Only trusted scripted fixtures use this mode. It is NOT a security sandbox.
+mode = "local"
+timeout_seconds = 15
+evaluation_wall_seconds = 120
+
+[budget]
+max_llm_calls = 80
+max_total_tokens = 100000
+max_tool_calls = 150
+wall_seconds = 300

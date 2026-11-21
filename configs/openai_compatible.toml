@@ -1,0 +1,33 @@
+mode = "multi"
+max_revisions = 1
+
+[data]
+source = "synthetic"
+stocks = 4
+sessions = 120
+train_sessions = 70
+validation_sessions = 25
+horizons = [1, 3, 5]
+
+[llm]
+backend = "openai_compatible"
+model = "${LLM_MODEL}"
+base_url = "${LLM_BASE_URL}"
+api_key_env = "LLM_API_KEY"
+token_parameter = "max_completion_tokens"
+max_output_tokens = 4096
+timeout_seconds = 60
+
+[execution]
+mode = "docker"
+image = "python:3.13-slim"
+cpus = 1.0
+memory_mb = 1024
+timeout_seconds = 30
+evaluation_wall_seconds = 300
+
+[budget]
+max_llm_calls = 80
+max_total_tokens = 100000
+max_tool_calls = 150
+wall_seconds = 1200
