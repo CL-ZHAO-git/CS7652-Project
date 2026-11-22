@@ -5,7 +5,8 @@ from pathlib import Path
 
 from platform_support import symlinks_supported
 
-from forecast_agents.evaluation.evaluator import evaluate, freeze_solution, score, validate_predictions
+from forecast_agents.evaluation.evaluator import (evaluate, freeze_solution, score, validate_predictions,
+                                                  zero_baseline)
 from forecast_agents.runtime.executor import Executor
 from forecast_agents.tasks.panel import Bar, Panel, TaskSpec, synthetic_panel
 from forecast_agents.templates import ZERO_CODE
@@ -29,7 +30,45 @@ def predict(history, state, horizons):
 '''
 
 
+FIT_DATE_CODE = '''def fit(history, horizons):
+    return {"fit_end": max(row["date"] for row in history)}
+
+def predict(history, state, horizons):
+    assert max(row["date"] for row in history) > state["fit_end"]
+    # Report which model made the forecast: the last date its fit could see.
+    value = float(state["fit_end"].replace("-", ""))
+    return [{"symbol": symbol, "horizon": h, "prediction": value, "risk": 0.0,
+             "abstain": False, "fallback": False}
+            for symbol in sorted({row["symbol"] for row in history}) for h in horizons]
+'''
+
+
 class EvaluationTests(unittest.TestCase):
+    def test_walk_forward_refits_each_block_on_history_through_its_cutoff(self):
+        panel = synthetic_panel(2, 300)  # weekdays from 2020-01-01 to early 2021
+        task = TaskSpec("2020-03-31", "2020-09-30", refit="quarter", validation_stride=10, test_stride=10)
+        with tempfile.TemporaryDirectory() as directory:
+            solution = Path(directory)
+            (solution / "pipeline.py").write_text(FIT_DATE_CODE)
+            validation = evaluate(panel, task, solution, Executor(), "validation")
+            test = evaluate(panel, task, solution, Executor(), "test")
+        self.assertEqual([b["fit_cutoff"] for b in validation["blocks"]], ["2020-03-31", "2020-06-30"])
+        self.assertEqual([b["fit_cutoff"] for b in test["blocks"]], ["2020-09-30", "2020-12-31"])
+        self.assertEqual(test["protocol"], "walk_forward_quarter")
+        for row in validation["rows"] + test["rows"]:
+            self.assertEqual(row["prediction"], float(row["fit_cutoff"].replace("-", "")))
+            self.assertGreater(row["origin"], row["fit_cutoff"])
+
+    def test_in_process_zero_baseline_matches_running_the_zero_pipeline(self):
+        panel = synthetic_panel(2, 300)
+        task = TaskSpec("2020-03-31", "2020-09-30", refit="quarter", test_stride=10)
+        with tempfile.TemporaryDirectory() as directory:
+            (Path(directory) / "pipeline.py").write_text(ZERO_CODE)
+            executed = evaluate(panel, task, Path(directory), Executor(), "test")
+        computed = zero_baseline(panel, task, "test")
+        for key in ("origins", "blocks", "metrics", "rows"):
+            self.assertEqual(computed[key], executed[key], key)
+
     def test_worker_gets_only_causal_prefixes_in_fresh_workspaces(self):
         panel = synthetic_panel(2, 24)
         task = TaskSpec(panel.dates[10], panel.dates[16])

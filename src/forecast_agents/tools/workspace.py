@@ -2,7 +2,7 @@ import json
 from dataclasses import asdict
 from pathlib import Path
 
-from forecast_agents.evaluation.evaluator import evaluate, freeze_solution
+from forecast_agents.evaluation.evaluator import evaluate, freeze_solution, summary_metrics
 
 
 def _schema(name, description, properties, required):
@@ -20,7 +20,8 @@ TOOL_DEFINITIONS = (
     _schema("write_file", "Create or replace a workspace text file; data/ is read-only.",
             {"path": STRING, "content": STRING}, ["path", "content"]),
     _schema("run_python", "Run a workspace Python script with a bounded deadline.", {"path": STRING}, ["path"]),
-    _schema("validate_candidate", "Evaluate solution/ on historical validation only; no test feedback.", {}, []),
+    _schema("validate_candidate", "Evaluate solution/ on historical validation only, overall and per "
+            "walk-forward fold; no test feedback.", {}, []),
     _schema("finish_stage", "Finish this stage or request a bounded revision. Call this tool alone.",
             {"status": {"type": "string", "enum": ["completed", "revise", "rejected"]},
              "artifacts": STRINGS, "findings": STRINGS, "recommendations": STRINGS,
@@ -116,8 +117,7 @@ class WorkspaceTools:
             self.last_validation_hash = digest
             self.events.emit("validation", candidate_hash=digest, metrics=report["metrics"])
             return {"report": "validation.json", "candidate_hash": digest,
-                    "metrics": {h: {k: v for k, v in metrics.items() if k != "risk_coverage"}
-                                for h, metrics in report["metrics"].items()}}
+                    "metrics": summary_metrics(report["metrics"]), "folds": report["blocks"]}
         if name == "finish_stage":
             for artifact in arguments["artifacts"]:
                 if not self.path(artifact).is_file():

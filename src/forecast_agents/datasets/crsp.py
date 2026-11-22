@@ -68,7 +68,7 @@ SPEC_LAYOUT = {
     "window": ("start", "end", "formation_date"),
     "universe": ("candidates", "stocks", "share_codes", "exchange_codes", "one_security_per_company"),
     "panel": ("mode", "anonymize", "seed"),
-    "output": ("raw_dir", "panel"),
+    "output": ("raw_dir", "panel", "expected_sha256"),
 }
 
 
@@ -97,6 +97,8 @@ class DatasetSpec:
     mode: str = "complete"
     anonymize: bool = True
     seed: int = 7652
+    # SHA-256 of the team's reference build; build refuses to write a different panel.
+    expected_sha256: str = ""
 
     def __post_init__(self):
         if not isinstance(self.name, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", self.name):
@@ -121,6 +123,9 @@ class DatasetSpec:
             raise ValueError("output.raw_dir is required")
         if not isinstance(self.panel, str) or not self.panel.endswith(".json"):
             raise ValueError("output.panel must be a .json path")
+        if not isinstance(self.expected_sha256, str) or (
+                self.expected_sha256 and not re.fullmatch(r"[0-9a-f]{64}", self.expected_sha256)):
+            raise ValueError("output.expected_sha256 must be empty or a lowercase SHA-256 hex digest")
 
 
 def load_spec(path):
@@ -412,6 +417,11 @@ def build_panel(spec, force=False):
     rows = [{"symbol": symbol, "date": day, "close": levels[symbol][index]}
             for index, day in enumerate(calendar) for symbol in sorted(levels)]
     text = "[\n" + ",\n".join(json.dumps(row, allow_nan=False) for row in rows) + "\n]\n"
+    digest = hashlib.sha256(text.encode()).hexdigest()
+    if spec.expected_sha256 and digest != spec.expected_sha256:
+        raise ValueError(f"This panel (SHA-256 {digest[:12]}...) differs from the team's reference build "
+                         f"({spec.expected_sha256[:12]}...). Your CRSP extract differs; compare "
+                         f"{raw_dir / 'manifest.json'} with the reference manifest before using it.")
     panel = Panel([Bar(**row) for row in json.loads(text)])  # exactly what the run loader does
     symbol_rows = [{**candidate, "symbol": symbol} for symbol, (candidate, _) in zip(symbols, order)]
     manifest = {
@@ -426,14 +436,14 @@ def build_panel(spec, force=False):
                          "biases the panel toward survivors."),
         "sessions": {"count": len(panel.dates), "first": panel.dates[0], "last": panel.dates[-1]},
         "stocks": len(panel.symbols), "dropped": dropped,
-        "files": {"panel": str(outputs["panel"]),
-                  "panel_sha256": hashlib.sha256(text.encode()).hexdigest(),
+        "files": {"panel": str(outputs["panel"]), "panel_sha256": digest,
                   "symbol_map": str(outputs["symbols"])},
     }
     outputs["panel"].parent.mkdir(parents=True, exist_ok=True)
     _write_text(outputs["panel"], text)
     _write_csv(outputs["symbols"], SYMBOL_COLUMNS, symbol_rows)
     _write_json(outputs["manifest"], manifest)
-    return {"panel": str(outputs["panel"]), "stocks": len(panel.symbols),
-            "sessions": manifest["sessions"], "dropped": len(dropped),
+    return {"panel": str(outputs["panel"]), "panel_sha256": digest,
+            "matches_reference": digest == spec.expected_sha256 if spec.expected_sha256 else None,
+            "stocks": len(panel.symbols), "sessions": manifest["sessions"], "dropped": len(dropped),
             "symbol_map": str(outputs["symbols"]), "manifest": str(outputs["manifest"])}

@@ -99,22 +99,58 @@ def score(rows, horizons):
     return result
 
 
+def summary_metrics(metrics):
+    """Per-horizon metrics without the risk-coverage curves."""
+    return {h: {k: v for k, v in metric.items() if k != "risk_coverage"} for h, metric in metrics.items()}
+
+
+def _report(split, task, blocks, rows_by_block, started):
+    rows = [row for block_rows in rows_by_block for row in block_rows]
+    return {"split": split, "protocol": task.protocol, "fit_cutoff": blocks[0].fit_cutoff,
+            "origins": [origin for block in blocks for origin in block.origins],
+            "blocks": [{"fit_cutoff": block.fit_cutoff, "first_origin": block.origins[0],
+                        "last_origin": block.origins[-1], "origins": len(block.origins),
+                        "metrics": summary_metrics(score(block_rows, task.horizons))}
+                       for block, block_rows in zip(blocks, rows_by_block)],
+            "metrics": score(rows, task.horizons), "rows": rows,
+            "elapsed_seconds": time.monotonic() - started}
+
+
+def zero_baseline(panel: Panel, task: TaskSpec, split="test"):
+    """The zero-return forecast on the same blocks, origins, and labels.
+
+    It is fixed code, so it is scored in-process instead of in per-origin sandboxes.
+    """
+    started = time.monotonic()
+    blocks = panel.blocks(task, split)
+    label_cutoff = task.validation_end if split == "validation" else panel.dates[-1]
+    rows_by_block = [[{"symbol": symbol, "horizon": h, "prediction": 0.0, "risk": 0.0,
+                       "abstain": False, "fallback": False, "origin": origin,
+                       "fit_cutoff": block.fit_cutoff, "effective_prediction": 0.0,
+                       "target": panel.label(symbol, origin, h, label_cutoff)}
+                      for origin in block.origins for symbol in panel.symbols for h in task.horizons]
+                     for block in blocks]
+    return _report(split, task, blocks, rows_by_block, started)
+
+
 def evaluate(panel: Panel, task: TaskSpec, solution: Path, executor, split="test",
              timeout_seconds=10.0, wall_seconds=120.0):
-    """Fit once at train_end; evaluate fresh processes on strictly causal prefixes.
+    """Fit each block at its cutoff; predict in fresh processes on strictly causal prefixes.
 
     Final labels remain in this controller. No per-origin workspace contains the
     full test period, a previous origin's files, or files created during fitting.
     """
     started = time.monotonic()
-    origins = panel.origins(task, split)
+    blocks = panel.blocks(task, split)
     worker = Path(__file__).with_name("worker.py")
 
     def invoke(operation, history, state=None):
         remaining = wall_seconds - (time.monotonic() - started)
         if remaining <= 0:
             raise TimeoutError("Evaluation wall-time limit exhausted")
-        with tempfile.TemporaryDirectory(prefix="forecast-eval-") as directory:
+        # Every call uses a new folder, so a folder left behind by a transient file lock
+        # (for example antivirus scanning on Windows) cannot leak into another origin.
+        with tempfile.TemporaryDirectory(prefix="forecast-eval-", ignore_cleanup_errors=True) as directory:
             root = Path(directory)
             freeze_solution(solution, root / "solution")
             shutil.copyfile(worker, root / "worker.py")
@@ -129,18 +165,19 @@ def evaluate(panel: Panel, task: TaskSpec, solution: Path, executor, split="test
                 raise ValueError("Candidate did not produce a bounded JSON result")
             return json.loads(path.read_text(encoding="utf-8"))
 
-    state = invoke("fit", panel.history(task.train_end))
-    rows = []
     label_cutoff = task.validation_end if split == "validation" else panel.dates[-1]
-    for origin in origins:
-        predictions = invoke("predict", panel.history(origin), state)
-        validate_predictions(predictions, panel.symbols, task.horizons)
-        for prediction in predictions:
-            row = {**prediction, "origin": origin,
-                   "target": panel.label(prediction["symbol"], origin,
-                                         prediction["horizon"], label_cutoff)}
-            row["effective_prediction"] = 0.0 if row["fallback"] else row["prediction"]
-            rows.append(row)
-    return {"split": split, "fit_cutoff": task.train_end, "origins": list(origins),
-            "metrics": score(rows, task.horizons), "rows": rows,
-            "elapsed_seconds": time.monotonic() - started}
+    rows_by_block = []
+    for block in blocks:
+        state = invoke("fit", panel.history(block.fit_cutoff))
+        rows = []
+        for origin in block.origins:
+            predictions = invoke("predict", panel.history(origin), state)
+            validate_predictions(predictions, panel.symbols, task.horizons)
+            for prediction in predictions:
+                row = {**prediction, "origin": origin, "fit_cutoff": block.fit_cutoff,
+                       "target": panel.label(prediction["symbol"], origin,
+                                             prediction["horizon"], label_cutoff)}
+                row["effective_prediction"] = 0.0 if row["fallback"] else row["prediction"]
+                rows.append(row)
+        rows_by_block.append(rows)
+    return _report(split, task, blocks, rows_by_block, started)

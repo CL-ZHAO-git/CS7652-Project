@@ -12,11 +12,19 @@ class Bar:
     close: float
 
 
+REFIT_CADENCES = ("none", "year", "quarter", "month")
+
+
 @dataclass(frozen=True)
 class TaskSpec:
     train_end: str
     validation_end: str
     horizons: tuple[int, ...] = (1, 3, 5)
+    # Walk-forward: refit at every calendar-period end after train_end, in validation
+    # folds and during the test. "none" fits once at train_end for both splits.
+    refit: str = "none"
+    validation_stride: int = 1  # score every n-th eligible origin
+    test_stride: int = 1
 
     def __post_init__(self):
         if any(date.fromisoformat(day).isoformat() != day for day in (self.train_end, self.validation_end)):
@@ -27,6 +35,22 @@ class TaskSpec:
             raise ValueError("Horizons must be nonempty and unique")
         if any(type(h) is not int or h <= 0 for h in self.horizons):
             raise ValueError("Horizons must be positive integers")
+        if self.refit not in REFIT_CADENCES:
+            raise ValueError(f"refit must be one of {', '.join(REFIT_CADENCES)}")
+        if any(type(s) is not int or s <= 0 for s in (self.validation_stride, self.test_stride)):
+            raise ValueError("Strides must be positive integers")
+
+    @property
+    def protocol(self):
+        return "fixed_fit_at_train_end" if self.refit == "none" else f"walk_forward_{self.refit}"
+
+
+@dataclass(frozen=True)
+class Block:
+    """One model fit and the forecast origins scored with it."""
+
+    fit_cutoff: str
+    origins: tuple[str, ...]
 
 
 class Panel:
@@ -72,21 +96,47 @@ class Panel:
             raise ValueError("Label has not matured by the information cutoff")
         return self.prices[symbol][end] / self.prices[symbol][i] - 1
 
-    def origins(self, task: TaskSpec, split: str):
+    def period_ends(self, cadence: str):
+        """Last session of each calendar year, quarter, or month, excluding the final session."""
+        key = {"year": lambda day: day[:4], "quarter": lambda day: (day[:4], (int(day[5:7]) - 1) // 3),
+               "month": lambda day: day[:7]}[cadence]
+        return [day for day, following in zip(self.dates, self.dates[1:]) if key(day) != key(following)]
+
+    def blocks(self, task: TaskSpec, split: str):
+        """Fits and the origins scored with each, in time order.
+
+        Validation folds span (train_end, validation_end]; the test spans the rest. Under
+        walk-forward, each block's model is fitted on all history through the block's
+        start. Origins are scored only if every horizon matures within the split.
+        """
         if task.train_end not in self._index or task.validation_end not in self._index:
             raise ValueError("Task boundaries must be observed trading sessions")
         if split == "validation":
-            start, end = task.train_end, task.validation_end
+            first_fit, start, end, stride = task.train_end, task.train_end, task.validation_end, task.validation_stride
         elif split == "test":
-            start, end = task.validation_end, self.dates[-1]
+            # Without refits, the single model fitted at train_end also serves the test.
+            first_fit = task.train_end if task.refit == "none" else task.validation_end
+            start, end, stride = task.validation_end, self.dates[-1], task.test_stride
         else:
             raise ValueError("Split must be validation or test")
-        origins = tuple(day for i, day in enumerate(self.dates)
-                        if start < day <= end and i + max(task.horizons) < len(self.dates)
-                        and self.dates[i + max(task.horizons)] <= end)
-        if not origins:
+        boundaries = [start]
+        if task.refit != "none":
+            boundaries += [day for day in self.period_ends(task.refit) if start < day < end]
+        horizon = max(task.horizons)
+        blocks = []
+        for number, boundary in enumerate(boundaries):
+            block_end = boundaries[number + 1] if number + 1 < len(boundaries) else end
+            eligible = [day for i, day in enumerate(self.dates)
+                        if boundary < day <= block_end and i + horizon < len(self.dates)
+                        and self.dates[i + horizon] <= end]
+            if eligible:
+                blocks.append(Block(first_fit if number == 0 else boundary, tuple(eligible[::stride])))
+        if not blocks:
             raise ValueError(f"No fully matured {split} origins")
-        return origins
+        return tuple(blocks)
+
+    def origins(self, task: TaskSpec, split: str):
+        return tuple(day for block in self.blocks(task, split) for day in block.origins)
 
 
 def synthetic_panel(stocks=4, sessions=120, seed=7):

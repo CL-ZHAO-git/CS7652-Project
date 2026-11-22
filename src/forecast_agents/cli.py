@@ -8,7 +8,7 @@ from pathlib import Path
 
 from forecast_agents.agents.runner import AgentRunner
 from forecast_agents.config import config_record, load_config, validate_config
-from forecast_agents.evaluation.evaluator import evaluate, freeze_solution
+from forecast_agents.evaluation.evaluator import evaluate, freeze_solution, summary_metrics, zero_baseline
 from forecast_agents.llm.backends import AnthropicBackend, OpenAICompatibleBackend
 from forecast_agents.llm.mock import MockBackend
 from forecast_agents.orchestration.policies import run_policy
@@ -16,7 +16,7 @@ from forecast_agents.runtime.budget import Budget
 from forecast_agents.runtime.events import EventLog
 from forecast_agents.runtime.executor import Executor
 from forecast_agents.tasks.panel import Bar, Panel, TaskSpec, synthetic_panel
-from forecast_agents.templates import PIPELINE_CONTRACT, ZERO_CODE
+from forecast_agents.templates import PIPELINE_CONTRACT
 from forecast_agents.tools.workspace import WorkspaceTools
 
 
@@ -61,14 +61,18 @@ def run_experiment(config, output: Path):
             validation = train + data.validation_sessions
         if validation >= len(panel.dates) - max(data.horizons):
             raise ValueError("Insufficient data for the requested train/validation/test windows")
-        task = TaskSpec(panel.dates[train], panel.dates[validation], data.horizons)
-        panel.origins(task, "validation")
+        task = TaskSpec(panel.dates[train], panel.dates[validation], data.horizons,
+                        data.refit, data.validation_stride, data.test_stride)
+        folds = [{"fit_cutoff": block.fit_cutoff, "first_origin": block.origins[0],
+                  "last_origin": block.origins[-1], "origins": len(block.origins)}
+                 for block in panel.blocks(task, "validation")]
         panel.origins(task, "test")
         workspace = output / "workspace"
         (workspace / "data").mkdir(parents=True)
         _dump(workspace / "data/history.json", panel.history(task.validation_end))
-        _dump(workspace / "task.json", {**asdict(task), "stock_pool": list(panel.symbols),
-                                      "protocol": "fixed_fit_at_train_end"})
+        # Agents learn the protocol and their validation folds, never the test dates.
+        _dump(workspace / "task.json", {**asdict(task), "protocol": task.protocol,
+                                      "stock_pool": list(panel.symbols), "validation_folds": folds})
         _write(workspace / "PIPELINE_CONTRACT.md", PIPELINE_CONTRACT)
         # Kept outside every container mount. Docker never receives this directory.
         private = output / "private"
@@ -105,14 +109,9 @@ def run_experiment(config, output: Path):
         report = evaluate(panel, task, output / "submission", executor, "test",
                           config.execution.timeout_seconds, config.execution.evaluation_wall_seconds)
         _dump(output / "test_report.json", report)
-        baseline_dir = output / "baseline"
-        baseline_dir.mkdir()
-        _write(baseline_dir / "pipeline.py", ZERO_CODE)
-        baseline = evaluate(panel, task, baseline_dir, executor, "test",
-                            config.execution.timeout_seconds, config.execution.evaluation_wall_seconds)
-        _dump(output / "baseline_report.json", baseline)
-        summary.update(status="completed", metrics={h: {k: v for k, v in metric.items() if k != "risk_coverage"}
-                                                   for h, metric in report["metrics"].items()})
+        _dump(output / "baseline_report.json", zero_baseline(panel, task, "test"))
+        summary.update(status="completed", metrics=summary_metrics(report["metrics"]),
+                       test_blocks=report["blocks"])
         events.emit("run_completed", candidate_hash=candidate_hash)
     except Exception as exc:
         summary.update(status="failed", error_type=type(exc).__name__, error=str(exc))

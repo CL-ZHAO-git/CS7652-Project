@@ -123,8 +123,12 @@ Write solution/pipeline.py and any local helpers under solution/.
 - history is a list of {symbol: str, date: ISO date, close: positive float} rows.
   close is the level of a total-return index (splits and dividends included), so
   close ratios are returns; the level itself is not a dollar price.
-- fit receives only observations through train_end, including only labels that
-  can be constructed from that history. Final scoring uses one fixed fit.
+- fit receives observations through a cutoff, including only labels that can be
+  constructed from that history. task.json gives the protocol. With refit "none",
+  one fit at train_end serves validation and the final test. With walk-forward
+  refits ("year", "quarter", or "month"), fit is called again at each period end
+  with all history to date, in every validation fold and during the final test,
+  so keep fitting fast enough to run several times.
 - predict receives a causal prefix through the current forecast origin.
 - Return exactly one row per observed stock and horizon, with these fields:
   symbol, horizon, prediction (finite number), risk (nonnegative finite number;
@@ -133,7 +137,9 @@ Write solution/pipeline.py and any local helpers under solution/.
   zero-return baseline. Emit a finite candidate prediction even when abstaining.
 - No final test labels or final test prices beyond the current origin are visible.
 - Use historical validation to choose models and thresholds. validate_candidate
-  returns validation scores only. freeze/submit does not reveal final test scores.
+  returns validation scores only, overall and per fold; folds cover different
+  market regimes, so check the worst fold as well as the average. freeze/submit
+  does not reveal final test scores.
 - Each fit/predict call runs in a fresh workspace. Persist learned state through
   the returned JSON state. Do not depend on fit-time files or Python globals.
 - The default runtime image has Python's standard library. Additional libraries

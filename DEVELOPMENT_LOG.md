@@ -74,22 +74,31 @@ Local comparison artifacts are under `runs/smoke-comparison-final/`, including
 version control; teammates should reproduce these artifacts using the commands
 below. No live API requests or Docker execution have been verified.
 
-### November 22, 2026: Cross-Platform Runtime and CRSP Data Layer
+### November 22, 2026: Cross-Platform Runtime, CRSP Data, and Walk-Forward Evaluation
 
-- **Windows 11, Python 3.13.** 43 tests: 41 pass and 2 symlink tests are skipped
+- **Windows 11, Python 3.13.** 48 tests: 46 pass and 2 symlink tests are skipped
   (no Developer Mode), with both `python -m unittest discover -s tests` and
   `pytest -q`. The new child-process and memory-limit tests fail when the Windows
   job object is disabled, so they test it.
-- **Full-size dry run.** A fake extract of 100 candidates over 2017-01 to 2019-06
-  went through `scripts/crsp_data.py build` (30 stocks x 649 weekday sessions) and
-  then `configs/crsp_demo.toml` settings. Single and multi mock runs each completed
-  in about 50 seconds, with 60 test origins.
-- **Not verified.** The live WRDS fetch has not run, because the development
-  environment has no WRDS credentials. Its queries are tested against a fake
-  connection that mirrors `wrds.Connection.raw_sql`. The suite has not been run on
-  macOS since these changes; POSIX code paths changed only to apply rlimits as best
-  effort, to resolve the Docker binary path, and to add `-X utf8`. Docker execution
-  remains unverified on every OS.
+- **Full-size walk-forward dry run.** A fake 10-year extract shaped like the final
+  window (100 candidates, 2015-2024) went through `scripts/crsp_data.py build`
+  (30 stocks x 2,608 weekday sessions) and a single-mode mock run with the
+  `configs/crsp_final_mock.toml` protocol: four validation folds of 52-53 origins
+  and three yearly test blocks of 257-260 origins. Local execution on Windows took
+  6.3 minutes in total: 56 seconds per validation call and about 4.3 minutes for
+  the final test. Docker adds container start-up to every origin, so real-agent
+  configs on these windows need larger time budgets than the synthetic examples.
+- **Live CRSP data.** Both windows were fetched from WRDS (legacy SIZ tables, which
+  end on 2024-12-31) and built: 30 stocks x 2,517 sessions for 2005-2014 and 30 x
+  2,516 for 2015-2024. Every panel daily return matches CRSP RET to within 4e-16.
+  The 2005-2014 build skipped Wachovia (acquired 2008) and Dell (taken private 2013)
+  for incomplete history; the 2015-2024 build skipped none. Each dataset spec records
+  its panel's SHA-256, and rebuilding reproduces it. Mock runs completed on both
+  windows (multi-agent on 2005-2014, single-agent on 2015-2024), each in about 6.5
+  minutes while running in parallel.
+- **Not verified.** The suite has not been run on macOS since these changes; POSIX
+  code paths changed only to apply rlimits as best effort, to resolve the Docker
+  binary path, and to add `-X utf8`. Docker execution remains unverified on every OS.
 
 ## Reproduce the Current Progress
 
@@ -121,15 +130,15 @@ environment, so verification used the offline test entry point.
 - **Real execution:** the API adapters have protocol tests using fixtures. Docker
   and live-model integration still need verification. Local execution is for
   trusted mock scripts and is not a security sandbox.
-- **Data:** the CRSP data layer has not yet run against live WRDS. The loader
-  requires a balanced panel, so CRSP panels keep only stocks with every session,
-  which biases them toward survivors; final windows need entries and exits. Agents
-  see only a total-return index, not the volume, market-cap, or market-index fields
-  already in the raw extract. The legacy SIZ tables limit windows to their coverage.
+- **Data:** the loader requires a balanced panel, so CRSP panels keep only stocks
+  with every session, which biases them toward survivors; final windows need entries
+  and exits. Agents see only a total-return index, not the volume, market-cap, or
+  market-index fields already in the raw extract. The legacy SIZ tables end on
+  2024-12-31.
 - **Models:** the mock demonstrates pooled ridge regression. Broad ML/DL search,
   prebuilt scientific-computing images, and GPU support are not implemented.
-- **Evaluation:** this version fits once at the training cutoff. It does not
-  implement rolling refits, controlled corruption scenarios, confidence intervals,
+- **Evaluation:** walk-forward refits with per-fold and per-year metrics are
+  implemented. Controlled corruption scenarios, confidence intervals,
   or the complete ablation matrix.
 - **Reliability:** output fields and descriptive metrics exist. The mock risk
   score is an uncalibrated heuristic, and its audit checks syntax only. Useful
@@ -167,11 +176,10 @@ evaluator; manually checked 1/3/5-session labels match the source convention;
 features and labels respect their information cutoffs; restricted data remain
 outside version control.
 
-**Status (November 22):** fetch and build are implemented with a provisional
-universe rule (top companies by formation-date market cap) and one development
-window. Next: run the live fetch, check a few stocks' labels against CRSP by hand,
-agree on reserved final windows, and extend the loader for entries, exits, and
-covariates.
+**Status (November 22):** both windows (development 2005–2014, final 2015–2024)
+are fetched from WRDS and built, and each dataset spec records its panel's
+fingerprint. Next: check a few stocks' returns by hand against an independent
+source, and extend the loader for entries, exits, and covariates.
 
 ### Priority 1 Establish the First Real Comparison
 
@@ -201,7 +209,7 @@ disagreement are measured as distinct signals.
 Compare feature engineering inside modeling against a separate feature role, and
 compare systems with and without auditing. Finalize repetitions and statistical
 comparisons that account for overlapping return horizons and cross-stock
-dependence. Add rolling refits, more model families, or additional providers when
+dependence. Add more model families or additional providers when
 the experiment requires them.
 
 **Completion criteria:** the results identify which role changes affect accuracy,

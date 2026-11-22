@@ -24,6 +24,10 @@ class DataConfig:
     # counts; each resolves to the last panel session on or before the date.
     train_end: str = ""
     validation_end: str = ""
+    # Walk-forward refits at each "year", "quarter", or "month" end ("none": one fit).
+    refit: str = "none"
+    validation_stride: int = 1
+    test_stride: int = 1
 
 
 @dataclass(frozen=True)
@@ -122,8 +126,9 @@ def validate_config(config: ExperimentConfig) -> ExperimentConfig:
         raise ValueError("Execution and generation limits must be finite and positive")
     if type(config.llm.max_output_tokens) is not int or type(config.execution.memory_mb) is not int:
         raise ValueError("Token and memory limits must be integers")
-    TaskSpec("2000-01-01", "2000-01-02", config.data.horizons)
-    boundaries = (config.data.train_end, config.data.validation_end)
+    TaskSpec("2000-01-01", "2000-01-02", config.data.horizons, config.data.refit,
+             config.data.validation_stride, config.data.test_stride)
+    boundaries =(config.data.train_end, config.data.validation_end)
     if any(type(day) is not str for day in boundaries) or bool(boundaries[0]) != bool(boundaries[1]):
         raise ValueError("Set both data.train_end and data.validation_end, or neither")
     if boundaries[0]:

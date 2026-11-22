@@ -2,8 +2,8 @@
 
 Run from the repository root; the commands are the same on macOS, Linux, and Windows:
 
-    python scripts/crsp_data.py fetch configs/datasets/crsp_lc30_2017_2019.toml
-    python scripts/crsp_data.py build configs/datasets/crsp_lc30_2017_2019.toml
+    python scripts/crsp_data.py fetch configs/datasets/crsp_lc30_2005_2014.toml
+    python scripts/crsp_data.py build configs/datasets/crsp_lc30_2005_2014.toml
 
 fetch needs WRDS access and the wrds package (python -m pip install -e ".[wrds]").
 The first connection asks for your WRDS password and may send a Duo push; wrds can

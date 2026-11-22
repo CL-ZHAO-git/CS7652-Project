@@ -1,7 +1,8 @@
 # Project Design and Experimental Plan
 
 This document records the design agreed during the project discussion on
-November 16, 2026, with engineering refinements from November 17, 2026. It develops the direction in
+November 16, 2026, with engineering refinements from November 17, 2026 and data and
+evaluation decisions from November 22, 2026 (section 13). It develops the direction in
 [the project proposal](<CS7652 Project Proposal.docx>) into an implementation and
 evaluation plan. The project is being designed for the final research experiments.
 The architecture below is agreed; numerical settings and candidate experiments
@@ -229,10 +230,14 @@ final experiments.
 
 ## 10. Open Decisions
 
-- Data access and source: confirm CRSP/WRDS availability and permitted storage.
-- Stock universe, date range, eligibility rules, and required fields.
-- Return construction and exact forecast issuance time/information cutoff.
-- Training, validation, development, and final-test windows; retraining schedule.
+- Data access and source: CRSP through WRDS is settled (section 13). Permitted
+  storage and sending CRSP excerpts to LLM providers still need confirmation.
+- Stock universe and date range are set provisionally (section 13); stock entries
+  and exits and additional input fields remain open.
+- Return construction and exact forecast issuance time/information cutoff: total
+  return compounded from CRSP RET, forecasting after the origin's close (section 13).
+- Training, validation, development, and final-test windows and the retraining
+  schedule: settled in section 13.
 - Candidate model families, allowed dependencies, and initial feature inputs.
 - Initial LLM provider/model, resource budgets, repetitions, and experimental
   sample size. The backend architecture will support interchangeable providers.
@@ -313,3 +318,33 @@ be checked against the same behavioral tests before formal experiments.
   [OpenAI](https://developers.openai.com/api/docs/guides/function-calling),
   [Anthropic](https://platform.claude.com/docs/en/agents-and-tools/tool-use/handle-tool-calls),
   and [Gemini](https://ai.google.dev/gemini-api/docs/function-calling).
+
+## 13. Data Windows and Walk-Forward Evaluation
+
+Decided November 22, 2026, for review with the data and evaluation pull request.
+
+- **Source:** CRSP daily stock files through WRDS, fetched once per window and
+  frozen, so every system and repeat run uses identical data. Each dataset spec
+  records the fingerprint of the team's reference build.
+- **Universe:** the 30 largest companies by market cap on the last session before
+  the window (ordinary common shares on NYSE, NYSE American, and NASDAQ; one share
+  class per company), keeping those with data on every session. This survivorship
+  bias is accepted for development; the loader must handle entries and exits before
+  final experiments.
+- **Targets:** cumulative total returns compounded from CRSP RET over 1, 3, and 5
+  sessions, forecast after the origin's close.
+- **Windows:** 2005–2014 for developing agents, prompts, and coordination; 2015–2024
+  for final experiments, run only after prompts and settings are frozen.
+- **Split:** 70/30 within each window. Agents see the first seven years; the last
+  three years are the hidden test.
+- **Validation:** walk-forward over four yearly folds (2008–2011 and 2018–2021),
+  each fitted on all earlier data and scored on every 5th session. Model selection
+  and abstention thresholds are judged across several market regimes rather than
+  one, and per-fold results expose a model that works in only one of them.
+- **Test:** the frozen pipeline is refitted each January on all data to date and
+  scored on every session; results are reported per year and overall. No LLM calls
+  occur during the test.
+
+Rationale: one short validation block reflects a single regime (2021 was a calm
+bull market, while 2022 was a bear market), so choices tuned on it may not carry
+over, and a model fitted once goes stale over a three-year test.

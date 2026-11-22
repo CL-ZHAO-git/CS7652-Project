@@ -27,7 +27,7 @@ def weekdays(start, count):
     return days
 
 
-CALENDAR = weekdays(date(2020, 12, 28), 42)  # CALENDAR[0] becomes the formation date
+CALENDAR = weekdays(date(2020, 12, 28), 100)  # 2020-12-28 (formation) to 2021-05-14
 
 
 class FakeNA:
@@ -211,11 +211,28 @@ class CrspTests(unittest.TestCase):
                     '[output]\nraw_dir = "data/raw/x"\npanel = "data/panels/x.json"\n')
             path.write_text(body, encoding="utf-8")
             self.assertEqual(load_spec(path).start, "2017-01-03")
-            path.write_text(body + "[universe]\nstock = 3\n", encoding="utf-8")
-            with self.assertRaises(ValueError):
-                load_spec(path)
-        shipped = load_spec(ROOT / "configs/datasets/crsp_lc30_2017_2019.toml")
-        self.assertEqual((shipped.candidates, shipped.stocks), (100, 30))
+            invalid = (body + "[universe]\nstock = 3\n",  # misspelled key
+                       body.replace("[output]\n", '[output]\nexpected_sha256 = "abc"\n'))
+            for text in invalid:
+                path.write_text(text, encoding="utf-8")
+                with self.subTest(text=text), self.assertRaises(ValueError):
+                    load_spec(path)
+        development = load_spec(ROOT / "configs/datasets/crsp_lc30_2005_2014.toml")
+        final = load_spec(ROOT / "configs/datasets/crsp_lc30_2015_2024.toml")
+        self.assertEqual((development.start, development.end), ("2005-01-03", "2014-12-31"))
+        self.assertEqual((final.start, final.end), ("2015-01-02", "2024-12-31"))
+        self.assertEqual({(spec.candidates, spec.stocks) for spec in (development, final)}, {(100, 30)})
+
+    def test_build_refuses_a_panel_that_differs_from_the_team_reference(self):
+        with tempfile.TemporaryDirectory() as directory:
+            spec = make_spec(directory)
+            fetch_raw(spec, FakeWRDS())
+            with self.assertRaisesRegex(ValueError, "differs from the team's reference"):
+                build_panel(replace(spec, expected_sha256="0" * 64))
+            self.assertFalse(Path(spec.panel).exists())
+            reference = build_panel(spec)["panel_sha256"]
+            summary = build_panel(replace(spec, expected_sha256=reference), force=True)
+            self.assertTrue(summary["matches_reference"])
 
     def test_build_script_runs_from_the_command_line(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -231,26 +248,36 @@ class CrspTests(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(json.loads(result.stdout)["stocks"], 2)
 
-    def test_runs_use_calendar_boundaries_on_a_built_panel(self):
+    def test_walk_forward_run_on_a_built_panel(self):
         with tempfile.TemporaryDirectory() as directory:
             spec = make_spec(directory)
             fetch_raw(spec, FakeWRDS())
             build_panel(spec)
-            saturday = CALENDAR[16] + timedelta(days=(5 - CALENDAR[16].weekday()) % 7)
-            data = DataConfig(source="json", path=spec.panel, train_end=saturday.isoformat(),
-                              validation_end=CALENDAR[30].isoformat())
+            # train_end is a Sunday and resolves to Friday 2021-01-29; folds are February and March.
+            data = DataConfig(source="json", path=spec.panel, train_end="2021-01-31",
+                              validation_end="2021-03-31", refit="month", validation_stride=5, test_stride=5)
             output = Path(directory) / "run"
             summary = run_experiment(ExperimentConfig(mode="single", data=data), output)
             self.assertEqual(summary["status"], "completed", summary.get("error"))
             task = json.loads((output / "workspace/task.json").read_text(encoding="utf-8"))
-            self.assertEqual(task["train_end"], max(day for day in CALENDAR if day <= saturday).isoformat())
+            self.assertEqual((task["train_end"], task["protocol"]), ("2021-01-29", "walk_forward_month"))
+            self.assertEqual([fold["fit_cutoff"] for fold in task["validation_folds"]], ["2021-01-29", "2021-02-26"])
+            validation = json.loads((output / "workspace/validation.json").read_text(encoding="utf-8"))
+            self.assertEqual(len(validation["blocks"]), 2)
+            self.assertEqual([block["fit_cutoff"] for block in summary["test_blocks"]], ["2021-03-31", "2021-04-30"])
             report = json.loads((output / "test_report.json").read_text(encoding="utf-8"))
             self.assertTrue(report["rows"])
             self.assertTrue(all(row["origin"] > task["validation_end"] for row in report["rows"]))
+            baseline = json.loads((output / "baseline_report.json").read_text(encoding="utf-8"))
+            self.assertEqual(baseline["origins"], report["origins"])
 
     def test_configs_take_dates_or_session_counts_not_both(self):
-        config = load_config(ROOT / "configs/crsp_demo.toml")
-        self.assertEqual((config.data.train_end, config.data.validation_end), ("2018-12-31", "2019-03-29"))
+        for name, dates in (("crsp_dev_mock", ("2007-12-31", "2011-12-31")),
+                            ("crsp_final_mock", ("2017-12-31", "2021-12-31"))):
+            config = load_config(ROOT / f"configs/{name}.toml")
+            self.assertEqual((config.data.train_end, config.data.validation_end), dates)
+            self.assertEqual((config.data.refit, config.data.validation_stride, config.data.test_stride),
+                             ("year", 5, 1))
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "config.toml"
             for body in ('[data]\ntrain_end = "2020-01-31"\nvalidation_end = "2020-03-31"\ntrain_sessions = 5\n',

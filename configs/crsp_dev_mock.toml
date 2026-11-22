@@ -1,0 +1,35 @@
+# DEVELOPMENT window, 2005-2014, with scripted mock agents: checks the data and the
+# walk-forward protocol without an LLM or Docker. For real agents, copy
+# configs/anthropic.toml or configs/openai_compatible.toml, replace its [data]
+# section with this one, and raise its time budgets.
+# Build the panel first: configs/datasets/crsp_lc30_2005_2014.toml
+mode = "multi"
+max_revisions = 1
+
+[data]
+source = "json"
+path = "data/panels/crsp_lc30_2005_2014.json"
+# 70/30 walk-forward: validation folds 2008, 2009, 2010, 2011 (each trained on all
+# earlier data); test 2012-2014, refitted each January on all data to date.
+train_end = "2007-12-31"       # fold 1 trains on 2005-2007
+validation_end = "2011-12-31"  # end of the agents' data; resolves to 2011-12-30
+refit = "year"
+validation_stride = 5          # score every 5th trading day in validation folds
+test_stride = 1                # score every test day
+horizons = [1, 3, 5]
+
+[llm]
+backend = "mock"
+max_output_tokens = 4096
+
+[execution]
+# Only trusted scripted fixtures use this mode. It is NOT a security sandbox.
+mode = "local"
+timeout_seconds = 120
+evaluation_wall_seconds = 3600
+
+[budget]
+max_llm_calls = 80
+max_total_tokens = 100000
+max_tool_calls = 150
+wall_seconds = 3600

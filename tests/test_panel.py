@@ -24,6 +24,32 @@ class PanelTests(unittest.TestCase):
         self.assertEqual(test[-1], panel.dates[34])
         self.assertTrue(all(row["date"] <= task.train_end for row in panel.history(task.train_end)))
 
+    def test_walk_forward_refits_at_each_year_end_and_strides_within_folds(self):
+        panel = synthetic_panel(1, 900)  # weekdays from 2020-01-01 to mid-2023
+        task = TaskSpec("2020-12-31", "2022-12-30", refit="year", validation_stride=5)
+        folds = panel.blocks(task, "validation")
+        self.assertEqual([fold.fit_cutoff for fold in folds], ["2020-12-31", "2021-12-31"])
+        self.assertTrue(all(day.startswith("2021") for day in folds[0].origins))
+        self.assertTrue(all(day.startswith("2022") for day in folds[1].origins))
+        for fold in folds:
+            gaps = {panel.dates.index(b) - panel.dates.index(a) for a, b in zip(fold.origins, fold.origins[1:])}
+            self.assertEqual(gaps, {5})
+        # Validation labels mature by validation_end; nothing reaches into the test.
+        self.assertLessEqual(panel.dates[panel.dates.index(folds[-1].origins[-1]) + 5], task.validation_end)
+        test = panel.blocks(task, "test")
+        self.assertEqual([block.fit_cutoff for block in test], ["2022-12-30"])
+        self.assertEqual(test[0].origins[0], "2023-01-02")
+        self.assertIn("2021-03-31", panel.period_ends("quarter"))
+
+    def test_without_refits_one_model_fitted_at_train_end_serves_both_splits(self):
+        panel = synthetic_panel(1, 40)
+        task = TaskSpec(panel.dates[15], panel.dates[29])
+        self.assertEqual([block.fit_cutoff for block in panel.blocks(task, "validation")], [task.train_end])
+        self.assertEqual([block.fit_cutoff for block in panel.blocks(task, "test")], [task.train_end])
+        self.assertEqual(task.protocol, "fixed_fit_at_train_end")
+        with self.assertRaises(ValueError):
+            TaskSpec(panel.dates[15], panel.dates[29], refit="weekly")
+
     def test_missing_sessions_are_rejected_instead_of_shortening_horizons(self):
         with self.assertRaisesRegex(ValueError, "balanced"):
             Panel([Bar("A", "2020-01-01", 1), Bar("A", "2020-01-02", 2),
