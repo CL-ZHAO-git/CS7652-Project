@@ -1,8 +1,12 @@
 import json
+import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+
+from platform_support import pid_alive, symlinks_supported
 
 from forecast_agents.agents.runner import AgentRunner
 from forecast_agents.llm.types import Message, ModelResponse, ToolCall, Usage
@@ -58,9 +62,61 @@ class RuntimeTests(unittest.TestCase):
             for path in ("../outside", "/tmp/absolute", "data/file.json", "task.json"):
                 with self.subTest(path=path), self.assertRaises(ValueError):
                     tools.execute("write_file", {"path": path, "content": "x"})
-            (root / "outside").symlink_to("/tmp", target_is_directory=True)
+
+    @unittest.skipUnless(symlinks_supported(), "creating symlinks needs Developer Mode on Windows")
+    def test_workspace_tools_reject_symlink_escape(self):
+        with tempfile.TemporaryDirectory() as directory, tempfile.TemporaryDirectory() as outside:
+            root = Path(directory)
+            tools = WorkspaceTools(root, None, None, None, None, None)
+            (root / "outside").symlink_to(outside, target_is_directory=True)
             with self.assertRaises(ValueError):
                 tools.execute("read_file", {"path": "outside/file"})
+
+    def test_tool_paths_and_protections_are_the_same_on_every_os(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "data").mkdir()
+            tools = WorkspaceTools(root, None, None, None, None, None)
+            # Case variants would overwrite inputs on case-insensitive macOS/Windows file systems.
+            for path in ("DATA/history.json", "Task.JSON", "solution/PIPELINE_CONTRACT.md",
+                         "solution\\pipeline.py", "C:/outside.py", "c:outside.py"):
+                with self.subTest(path=path), self.assertRaises(ValueError):
+                    tools.execute("write_file", {"path": path, "content": "x"})
+            tools.execute("write_file", {"path": "solution/lib/helper.py", "content": "a\nb\n"})
+            self.assertEqual(tools.execute("list_files", {})["files"], ["solution/lib/helper.py"])
+            self.assertEqual((root / "solution/lib/helper.py").read_bytes(), b"a\nb\n")  # no CRLF
+
+    def test_descendant_processes_do_not_outlive_execution(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "spawn.py").write_text(
+                "import subprocess, sys\n"
+                "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+                "print(child.pid)\n")
+            result = Executor().execute(root, "spawn.py", timeout=20)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            pid = int(result.stdout.strip())
+            deadline = time.monotonic() + 5
+            while pid_alive(pid) and time.monotonic() < deadline:
+                time.sleep(0.05)
+            self.assertFalse(pid_alive(pid))
+
+    @unittest.skipIf(sys.platform == "darwin", "macOS does not enforce RLIMIT_AS")
+    def test_local_memory_limit_is_enforced(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "allocate.py").write_text("block = bytearray(512 * 1024 * 1024)\nprint('allocated')\n")
+            result = Executor(memory_mb=256).execute(root, "allocate.py", timeout=30)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("MemoryError", result.stderr)
+
+    def test_generated_code_prints_utf8_on_every_os(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "unicode.py").write_text("print('\\u2265 \\u2014 \\u00e9')\n")
+            result = Executor().execute(root, "unicode.py")
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.strip(), "\u2265 \u2014 \u00e9")
 
     def test_executor_times_out_and_does_not_forward_api_environment(self):
         with tempfile.TemporaryDirectory() as directory:

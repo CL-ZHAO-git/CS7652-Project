@@ -1,0 +1,13 @@
+# Store text files with LF line endings and check them out with LF on every OS,
+# so macOS, Linux, and Windows working trees are byte-identical. (Git for Windows
+# otherwise converts to CRLF on checkout when core.autocrlf=true.)
+* text=auto eol=lf
+
+# cmd.exe batch files need CRLF.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Binary documents.
+*.docx binary
+*.pdf binary
+*.png binary

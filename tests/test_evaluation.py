@@ -1,6 +1,9 @@
+import hashlib
 import tempfile
 import unittest
 from pathlib import Path
+
+from platform_support import symlinks_supported
 
 from forecast_agents.evaluation.evaluator import evaluate, freeze_solution, score, validate_predictions
 from forecast_agents.runtime.executor import Executor
@@ -81,7 +84,7 @@ class EvaluationTests(unittest.TestCase):
         self.assertEqual(len(metrics["risk_coverage"]), 1)
         self.assertEqual(metrics["risk_coverage"][0]["coverage"], 1.0)
 
-    def test_snapshot_hash_changes_with_source_and_rejects_symlinks(self):
+    def test_snapshot_hash_changes_with_source(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             source = root / "solution"
@@ -91,6 +94,28 @@ class EvaluationTests(unittest.TestCase):
             (source / "pipeline.py").write_text(ZERO_CODE + "\n# revision\n")
             second = freeze_solution(source, root / "second")
             self.assertNotEqual(first, second)
+
+    def test_snapshot_hash_is_identical_across_operating_systems(self):
+        files = {"pipeline.py": b"x = 1\n", "B.py": b"b\n", "a.py": b"a\n", "lib/helper.py": b"h\n"}
+        expected = hashlib.sha256()
+        # POSIX separators, case-sensitive order of path parts: "B.py" sorts before "a.py".
+        for name in ("B.py", "a.py", "lib/helper.py", "pipeline.py"):
+            expected.update(name.encode() + b"\0" + files[name] + b"\0")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "solution/lib").mkdir(parents=True)
+            for name, content in files.items():
+                (root / "solution" / name).write_bytes(content)
+            self.assertEqual(freeze_solution(root / "solution", root / "frozen"), expected.hexdigest())
+
+    @unittest.skipUnless(symlinks_supported(), "creating symlinks needs Developer Mode on Windows")
+    def test_snapshot_rejects_symlinks(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "solution"
+            source.mkdir()
+            (source / "pipeline.py").write_text(ZERO_CODE)
+            freeze_solution(source, root / "first")
             (source / "link").symlink_to(root / "first")
             with self.assertRaisesRegex(ValueError, "symlink"):
                 freeze_solution(source, root / "third")

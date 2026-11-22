@@ -2,6 +2,7 @@ import math
 import os
 import tomllib
 from dataclasses import asdict, dataclass, field
+from datetime import date
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -19,6 +20,10 @@ class DataConfig:
     train_sessions: int = 70
     validation_sessions: int = 25
     horizons: tuple[int, ...] = (1, 3, 5)
+    # Optional calendar boundaries (YYYY-MM-DD). When set, they replace the session
+    # counts; each resolves to the last panel session on or before the date.
+    train_end: str = ""
+    validation_end: str = ""
 
 
 @dataclass(frozen=True)
@@ -70,6 +75,12 @@ def load_config(path: Path) -> ExperimentConfig:
                 values[key] = os.environ[variable]
         if name == "data" and "horizons" in values:
             values["horizons"] = tuple(values["horizons"])
+        if name == "data":
+            for key in ("train_end", "validation_end"):
+                if type(values.get(key)) is date:  # unquoted TOML date
+                    values[key] = values[key].isoformat()
+            if {"train_end", "validation_end"} & set(values) and {"train_sessions", "validation_sessions"} & set(values):
+                raise ValueError("Use data.train_end/validation_end dates or session counts, not both")
         try:
             sections[name] = cls(**values)
         except TypeError as exc:
@@ -112,6 +123,11 @@ def validate_config(config: ExperimentConfig) -> ExperimentConfig:
     if type(config.llm.max_output_tokens) is not int or type(config.execution.memory_mb) is not int:
         raise ValueError("Token and memory limits must be integers")
     TaskSpec("2000-01-01", "2000-01-02", config.data.horizons)
+    boundaries = (config.data.train_end, config.data.validation_end)
+    if any(type(day) is not str for day in boundaries) or bool(boundaries[0]) != bool(boundaries[1]):
+        raise ValueError("Set both data.train_end and data.validation_end, or neither")
+    if boundaries[0]:
+        TaskSpec(*boundaries, config.data.horizons)  # canonical dates, train before validation
     if config.data.source == "json" and not config.data.path:
         raise ValueError("JSON data source requires data.path")
     return config

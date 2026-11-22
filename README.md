@@ -29,12 +29,22 @@ agents receive role instructions and tools and must create their own code.
 
 ## Quick Start
 
-Run from the repository root on Linux with Python 3.11 or newer. The offline demo
-requires no third-party packages, API credentials, Docker, or downloaded data:
+Run from the repository root on macOS, Linux, or Windows with Python 3.11 or newer.
+The offline demo requires no third-party packages, API credentials, Docker, or
+downloaded data. On macOS or Linux:
 
 ```bash
 PYTHONPATH=src python -m forecast_agents run --config configs/demo.toml --output runs/demo-multi
 PYTHONPATH=src python -m forecast_agents run --config configs/demo.toml --mode single --output runs/demo-single
+```
+
+In Windows PowerShell, set `PYTHONPATH` once per session (the editable installation
+below needs no `PYTHONPATH`):
+
+```powershell
+$env:PYTHONPATH = "src"
+python -m forecast_agents run --config configs/demo.toml --output runs/demo-multi
+python -m forecast_agents run --config configs/demo.toml --mode single --output runs/demo-single
 ```
 
 Every output directory must be new. Existing runs are never overwritten. To run
@@ -47,32 +57,47 @@ python eval/run_smoke.py --output-root runs/smoke-comparison
 The mock conditions intentionally produce the same forecasting sources. Their
 different role and call traces test orchestration, not scientific hypotheses.
 
-For an editable installation and pytest:
+For an editable installation and pytest on macOS or Linux:
 
 ```bash
 python -m venv .venv
-.venv/bin/python -m pip install -e '.[dev]'
+.venv/bin/python -m pip install -e ".[dev]"
 .venv/bin/python -m pytest -q
 .venv/bin/forecast-agents run --config configs/demo.toml --output runs/installed-demo
+```
+
+In Windows PowerShell:
+
+```powershell
+python -m venv .venv
+.venv\Scripts\python -m pip install -e ".[dev]"
+.venv\Scripts\python -m pytest -q
+.venv\Scripts\forecast-agents run --config configs/demo.toml --output runs/installed-demo
 ```
 
 Package installation needs access to the configured Python package index. The
 same tests also have an offline standard-library entry point:
 
 ```bash
-PYTHONPATH=src python -m unittest discover -s tests -v
+PYTHONPATH=src python -m unittest discover -s tests -v              # macOS/Linux
+$env:PYTHONPATH = "src"; python -m unittest discover -s tests -v    # PowerShell
 ```
 
 Tests cover label maturity, session-based horizons, causal observation prefixes,
 fresh evaluation workspaces, prediction completeness, abstention/fallback metrics,
-snapshot integrity, budget exhaustion, provider continuation state, and end-to-end
-single/multi runs. No numerical coverage threshold is prescribed.
+snapshot integrity, budget exhaustion, provider continuation state, end-to-end
+single/multi runs, child-process cleanup, platform-independent paths and hashes,
+and the CRSP fetch/build steps against a fake WRDS connection. On Windows without
+Developer Mode, the two symlink tests are skipped. No numerical coverage threshold
+is prescribed.
 
 ## Real LLM Backends
 
 Real LLM-generated code requires the Docker execution mode; the configuration
 loader rejects real backends paired with local execution. Docker must be installed
-and its daemon accessible. Pull or build the configured image before running:
+and its daemon accessible; on macOS and Windows, Docker Desktop provides it. Windows
+hosts have no POSIX user ID to map, so containers there run as UID 1000. Pull or
+build the configured image before running:
 
 ```bash
 docker pull python:3.13-slim
@@ -120,13 +145,17 @@ validation_sessions = 25
 horizons = [1, 3, 5]
 ```
 
+Instead of session counts, `train_end` and `validation_end` (YYYY-MM-DD) set
+calendar boundaries; each resolves to the last panel session on or before that
+date. Use one form or the other, as in [crsp_demo.toml](configs/crsp_demo.toml).
+
 The JSON file is an array of `{ "symbol": "A", "date": "2020-01-02", "close": 100.0 }`
 records. Use ISO dates, unique stock-date pairs, and positive finite prices with a
 consistent adjustment/return convention. This initial loader requires a balanced
 panel with the same observed sessions for every stock. It rejects missing rows
-rather than silently changing horizon lengths. Universe selection, corporate
-actions, delistings, and CRSP/WRDS ingestion still need a dedicated data layer.
-Keep restricted data and credentials out of version control.
+rather than silently changing horizon lengths. [CRSP/WRDS Data](#crspwrds-data)
+builds this format from CRSP. Keep restricted data and credentials out of version
+control.
 
 Training uses the first `train_sessions` dates. The following
 `validation_sessions` dates form the development validation period; subsequent
@@ -163,12 +192,64 @@ separately. Risk-coverage curves use raw forecasts and are post-hoc descriptive
 results, not threshold calibration. No confidence intervals or significance claims
 are produced by the smoke evaluator.
 
+## CRSP/WRDS Data
+
+`scripts/crsp_data.py` turns WRDS access into the panel JSON above in two steps.
+Each experiment window has a dataset spec in `configs/datasets/`;
+[crsp_lc30_2017_2019.toml](configs/datasets/crsp_lc30_2017_2019.toml) is a
+development window (train 2017-2018, validate 2019 Q1, test 2019 Q2). The commands
+are identical on macOS, Linux, and Windows:
+
+```bash
+python -m pip install -e ".[wrds]"   # once; wrds currently needs Python 3.11-3.13
+python scripts/crsp_data.py fetch configs/datasets/crsp_lc30_2017_2019.toml
+python scripts/crsp_data.py build configs/datasets/crsp_lc30_2017_2019.toml
+python -m forecast_agents run --config configs/crsp_demo.toml --output runs/crsp-demo-multi
+```
+
+The first `fetch` asks for your WRDS password (and possibly a Duo approval); the
+`wrds` package can save it to your own pgpass file, outside the repository. Set
+`WRDS_USERNAME` or pass `--wrds-username`. The last command needs `PYTHONPATH=src`
+or the editable installation.
+
+- **fetch** (needs WRDS) ranks companies by market cap on the formation date (the
+  last CRSP session before `start`) among ordinary common shares (SHRCD 10/11) on
+  NYSE, NYSE American, and NASDAQ (EXCHCD 1/2/3), keeping one share class per
+  company. For the top `candidates`, it downloads daily `crsp.dsf` rows (RET, RETX,
+  PRC, VOL, SHROUT, adjustment factors, open/high/low, bid/ask) with their
+  `crsp.dsenames` and `crsp.dsedelist` records, plus the `crsp.dsi` market indices
+  (VWRETD, EWRETD, SPRTRN), into `data/raw/<name>/` with a manifest.
+- **build** (offline) keeps the `stocks` highest-ranked candidates that have a CRSP
+  row and a valid RET on every session, and writes `data/panels/<name>.json`.
+  `close` is a total-return index compounded forward from 1.0, so
+  `close[t+h]/close[t] - 1` is the cumulative return including dividends. Symbols
+  are anonymized (`S000`, ...); the PERMNO/ticker map (`<name>.symbols.csv`) and a
+  manifest listing dropped candidates stay beside the panel.
+
+Known limitations:
+
+- Requiring every session conditions on survival through the window end. This
+  survivorship bias is acceptable for development runs only; `PROJECT_DESIGN.md`
+  excludes it for final experiments. The build manifest lists each company dropped
+  for this reason. Removing the bias requires a loader that allows entries and exits.
+- The loader accepts only `symbol`, `date`, and `close`, so agents do not yet see
+  volume, market cap, or market returns, although the raw extract contains them.
+- The fetch reads CRSP's legacy SIZ tables, which CRSP has replaced with the CIZ
+  format. It reports their coverage and rejects windows beyond it; later windows
+  need a CIZ variant of the queries.
+- Raw extracts, panels, and run directories contain CRSP data, and real agents send
+  tool output to the configured LLM provider. Check your WRDS/CRSP license terms
+  before sharing files or running real agents on CRSP data.
+
 ## Execution and Budget Semantics
 
 `local` execution is exclusively for the trusted mock fixtures. Process deadlines,
 memory/file limits, environment filtering, and path checks do **not** make local
 Python a security sandbox; it can access host files. Do not use it for untrusted
-code or formal leakage-isolation claims.
+code or formal leakage-isolation claims. Limits use each platform's mechanism:
+rlimits and a process group on Linux and macOS (macOS does not enforce the memory
+rlimit), and a job object on Windows, which caps memory and kills child processes
+when a script ends.
 
 Docker execution disables networking, drops capabilities, uses a non-root UID,
 limits CPU/memory/processes, and mounts development data read-only. The evaluator
@@ -200,7 +281,10 @@ src/forecast_agents/
   orchestration/   single-agent and multi-agent policies
   runtime/         execution, budget ledger, event log
   evaluation/      frozen-pipeline worker and independent scoring
+  datasets/        CRSP/WRDS fetch and panel construction, outside agent runs
 configs/           reproducible TOML settings
+configs/datasets/  dataset specs for scripts/crsp_data.py
+scripts/           data preparation entry points
 tests/             pytest-compatible unittest tests
 eval/              offline smoke-comparison entry point
 runs/<run>/
@@ -217,10 +301,20 @@ runs/<run>/
 Full development traces and datasets can be sensitive; review run artifacts before
 sharing them. The repository ignores run output, `.env`, and `data/` by default.
 
+## Working Across macOS and Windows
+
+`.gitattributes` stores text files with LF line endings and checks them out with LF
+on every OS, regardless of each person's `core.autocrlf` setting. Run artifacts are
+UTF-8 with LF, agent tools use forward-slash paths and the same case-insensitive
+input protection everywhere, and candidate hashes match across platforms. Run both
+conditions of a paired comparison on the same machine: Docker image IDs differ
+between Apple Silicon and x86, and wall-time budgets depend on hardware.
+
 ## Next Research Milestones
 
-Connect the actual stock dataset and selected live model; establish the stock
-universe, adjustment conventions, windows, and model dependencies. Then add
+Fetch CRSP data for the agreed windows and select a live model. Extend the loader
+with covariates and with stock entries and exits so final windows avoid survivorship
+bias, and settle the model dependencies. Then add
 controlled corruptions, calibrated reliability decisions, matched-budget repeated
 experiments, role ablations, and uncertainty estimates that respect temporal and
 cross-stock dependence. Broad ML/DL search and autonomous audit quality require

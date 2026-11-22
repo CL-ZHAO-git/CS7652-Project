@@ -86,7 +86,7 @@ from pathlib import Path
 rows = json.loads(Path("data/history.json").read_text())
 report = {"rows": len(rows), "observations_per_stock": dict(Counter(row["symbol"] for row in rows)),
           "latest_visible_date": max(row["date"] for row in rows),
-          "scope": "Synthetic smoke test; no automated data-quality conclusions"}
+          "scope": "Scripted smoke test; no automated data-quality conclusions"}
 Path("diagnostics.json").write_text(json.dumps(report, indent=2))
 print(json.dumps(report))
 '''
@@ -121,6 +121,8 @@ Write solution/pipeline.py and any local helpers under solution/.
 - fit(history, horizons) -> JSON-serializable model state.
 - predict(history, state, horizons) -> a list of prediction rows.
 - history is a list of {symbol: str, date: ISO date, close: positive float} rows.
+  close is the level of a total-return index (splits and dividends included), so
+  close ratios are returns; the level itself is not a dollar price.
 - fit receives only observations through train_end, including only labels that
   can be constructed from that history. Final scoring uses one fixed fit.
 - predict receives a causal prefix through the current forecast origin.

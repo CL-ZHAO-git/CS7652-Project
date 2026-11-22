@@ -11,6 +11,8 @@ dependencies = []
 
 [project.optional-dependencies]
 dev = ["pytest>=8,<10"]
+# Only for scripts/crsp_data.py fetch. wrds pins pandas<2.3, so use Python 3.11-3.13.
+wrds = ["wrds>=3.1,<4"]
 
 [project.scripts]
 forecast-agents = "forecast_agents.cli:main"

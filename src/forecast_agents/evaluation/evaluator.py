@@ -20,7 +20,9 @@ def freeze_solution(source: Path, destination: Path):
     entries = list(source.rglob("*"))
     if len(entries) > 1000 or any(p.is_symlink() for p in entries):
         raise ValueError("Candidate contains symlinks or too many entries")
-    files = sorted(p for p in entries if p.is_file() and "__pycache__" not in p.parts)
+    # Case-sensitive ordering and POSIX separators give the same hash on every OS.
+    files = sorted((p for p in entries if p.is_file() and "__pycache__" not in p.parts),
+                   key=lambda p: p.relative_to(source).parts)
     if sum(p.stat().st_size for p in files) > 10 * 1024 * 1024:
         raise ValueError("Candidate exceeds 10 MiB source/artifact limit")
     destination.mkdir(parents=True, exist_ok=False)
@@ -31,7 +33,7 @@ def freeze_solution(source: Path, destination: Path):
         target.parent.mkdir(parents=True, exist_ok=True)
         content = source_file.read_bytes()
         target.write_bytes(content)
-        digest.update(str(relative).encode() + b"\0" + content + b"\0")
+        digest.update(relative.as_posix().encode() + b"\0" + content + b"\0")
     return digest.hexdigest()
 
 
@@ -125,7 +127,7 @@ def evaluate(panel: Panel, task: TaskSpec, solution: Path, executor, split="test
             path = root / "result.json"
             if not path.is_file() or path.is_symlink() or path.stat().st_size > 10 * 1024 * 1024:
                 raise ValueError("Candidate did not produce a bounded JSON result")
-            return json.loads(path.read_text())
+            return json.loads(path.read_text(encoding="utf-8"))
 
     state = invoke("fit", panel.history(task.train_end))
     rows = []

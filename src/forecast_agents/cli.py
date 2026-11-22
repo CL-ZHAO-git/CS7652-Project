@@ -1,4 +1,5 @@
 import argparse
+import bisect
 import json
 import sys
 from dataclasses import asdict, replace
@@ -20,7 +21,20 @@ from forecast_agents.tools.workspace import WorkspaceTools
 
 
 def _dump(path, value):
-    path.write_text(json.dumps(value, indent=2, allow_nan=False) + "\n", encoding="utf-8")
+    path.write_text(json.dumps(value, indent=2, allow_nan=False) + "\n", encoding="utf-8", newline="\n")
+
+
+def _write(path, text):
+    # UTF-8 with LF on every OS, so run artifacts are byte-identical across platforms.
+    path.write_text(text, encoding="utf-8", newline="\n")
+
+
+def _session_index(dates, day):
+    """Index of the last panel session on or before day."""
+    index = bisect.bisect_right(dates, day) - 1
+    if index < 0:
+        raise ValueError(f"{day} is before the first panel session ({dates[0]})")
+    return index
 
 
 def run_experiment(config, output: Path):
@@ -38,9 +52,13 @@ def run_experiment(config, output: Path):
         if data.source == "synthetic":
             panel = synthetic_panel(data.stocks, data.sessions, data.seed)
         else:
-            panel = Panel([Bar(**row) for row in json.loads(Path(data.path).read_text())])
-        train = data.train_sessions - 1
-        validation = train + data.validation_sessions
+            panel = Panel([Bar(**row) for row in json.loads(Path(data.path).read_text(encoding="utf-8"))])
+        if data.train_end:
+            train = _session_index(panel.dates, data.train_end)
+            validation = _session_index(panel.dates, data.validation_end)
+        else:
+            train = data.train_sessions - 1
+            validation = train + data.validation_sessions
         if validation >= len(panel.dates) - max(data.horizons):
             raise ValueError("Insufficient data for the requested train/validation/test windows")
         task = TaskSpec(panel.dates[train], panel.dates[validation], data.horizons)
@@ -51,7 +69,7 @@ def run_experiment(config, output: Path):
         _dump(workspace / "data/history.json", panel.history(task.validation_end))
         _dump(workspace / "task.json", {**asdict(task), "stock_pool": list(panel.symbols),
                                       "protocol": "fixed_fit_at_train_end"})
-        (workspace / "PIPELINE_CONTRACT.md").write_text(PIPELINE_CONTRACT)
+        _write(workspace / "PIPELINE_CONTRACT.md", PIPELINE_CONTRACT)
         # Kept outside every container mount. Docker never receives this directory.
         private = output / "private"
         private.mkdir(mode=0o700)
@@ -89,7 +107,7 @@ def run_experiment(config, output: Path):
         _dump(output / "test_report.json", report)
         baseline_dir = output / "baseline"
         baseline_dir.mkdir()
-        (baseline_dir / "pipeline.py").write_text(ZERO_CODE)
+        _write(baseline_dir / "pipeline.py", ZERO_CODE)
         baseline = evaluate(panel, task, baseline_dir, executor, "test",
                             config.execution.timeout_seconds, config.execution.evaluation_wall_seconds)
         _dump(output / "baseline_report.json", baseline)

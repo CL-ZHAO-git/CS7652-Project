@@ -1,13 +1,14 @@
 # Development Progress and Next Steps
 
-Updated November 21, 2026.
+Updated November 22, 2026.
 
 The initial experimental framework is implemented and runs end to end with
 synthetic data and a deterministic MockBackend. Both single-agent and four-role
-workflows complete forecasting and independent scoring. The next milestone is
-to verify real LLM execution in Docker and connect an approved stock dataset.
-There are no empirical results about the benefits of multi-agent specialization
-yet.
+workflows complete forecasting and independent scoring. The runtime now runs on
+macOS, Linux, and Windows, and a CRSP/WRDS data layer builds the panel from CRSP.
+The next milestones are a live WRDS fetch for the agreed windows and real LLM
+execution in Docker. There are no empirical results about the benefits of
+multi-agent specialization yet.
 
 ## Agreed Research Design
 
@@ -39,7 +40,9 @@ execution, data contracts, and implementation limitations are in
 | Execution and records | Provides local fixture execution and a Docker execution path, process deadlines, a shared budget ledger, and ordered JSONL events. | [runtime/](src/forecast_agents/runtime) |
 | Forecasting task | Generates seeded synthetic panels, loads preprocessed JSON panels, defines chronological windows, and checks label maturity. | [panel.py](src/forecast_agents/tasks/panel.py) |
 | Independent evaluation | Fits at the training cutoff and predicts from causal history prefixes in fresh workspaces. Checks output completeness and computes per-horizon metrics. | [evaluation/](src/forecast_agents/evaluation) |
-| Reproducible settings | Provides mock, OpenAI-compatible, and Anthropic configurations. | [configs/](configs) |
+| Reproducible settings | Provides mock, OpenAI-compatible, and Anthropic configurations, plus calendar-date split boundaries. | [configs/](configs) |
+| CRSP data preparation | Fetches a point-in-time large-cap universe and daily CRSP data from WRDS; builds an anonymized total-return panel with a private symbol map and manifest. | [crsp.py](src/forecast_agents/datasets/crsp.py), [crsp_data.py](scripts/crsp_data.py) |
+| Cross-platform execution | Local execution uses rlimits and process groups on POSIX and a job object on Windows; artifacts, tool paths, and candidate hashes are identical across OSes. | [executor.py](src/forecast_agents/runtime/executor.py) |
 
 The mock workflow writes executable feature and pooled ridge-regression code,
 runs diagnostics, requests historical validation, and performs syntax smoke
@@ -71,10 +74,28 @@ Local comparison artifacts are under `runs/smoke-comparison-final/`, including
 version control; teammates should reproduce these artifacts using the commands
 below. No live API requests or Docker execution have been verified.
 
+### November 22, 2026: Cross-Platform Runtime and CRSP Data Layer
+
+- **Windows 11, Python 3.13.** 43 tests: 41 pass and 2 symlink tests are skipped
+  (no Developer Mode), with both `python -m unittest discover -s tests` and
+  `pytest -q`. The new child-process and memory-limit tests fail when the Windows
+  job object is disabled, so they test it.
+- **Full-size dry run.** A fake extract of 100 candidates over 2017-01 to 2019-06
+  went through `scripts/crsp_data.py build` (30 stocks x 649 weekday sessions) and
+  then `configs/crsp_demo.toml` settings. Single and multi mock runs each completed
+  in about 50 seconds, with 60 test origins.
+- **Not verified.** The live WRDS fetch has not run, because the development
+  environment has no WRDS credentials. Its queries are tested against a fake
+  connection that mirrors `wrds.Connection.raw_sql`. The suite has not been run on
+  macOS since these changes; POSIX code paths changed only to apply rlimits as best
+  effort, to resolve the Docker binary path, and to add `-X utf8`. Docker execution
+  remains unverified on every OS.
+
 ## Reproduce the Current Progress
 
-Run from the repository root on Linux with Python 3.11 or newer. These commands
-need no API credentials or third-party packages:
+Run from the repository root on macOS, Linux, or Windows with Python 3.11 or newer
+(see the README for PowerShell syntax). These commands need no API credentials or
+third-party packages:
 
 ```bash
 # Run both mock conditions and save reports. Choose a new output directory.
@@ -100,9 +121,11 @@ environment, so verification used the offline test entry point.
 - **Real execution:** the API adapters have protocol tests using fixtures. Docker
   and live-model integration still need verification. Local execution is for
   trusted mock scripts and is not a security sandbox.
-- **Data:** no real stock dataset is integrated. The initial loader requires a
-  balanced panel and rejects missing sessions. Stock-universe rules, corporate
-  actions, delistings, and the final return convention remain unresolved.
+- **Data:** the CRSP data layer has not yet run against live WRDS. The loader
+  requires a balanced panel, so CRSP panels keep only stocks with every session,
+  which biases them toward survivors; final windows need entries and exits. Agents
+  see only a total-return index, not the volume, market-cap, or market-index fields
+  already in the raw extract. The legacy SIZ tables limit windows to their coverage.
 - **Models:** the mock demonstrates pooled ridge regression. Broad ML/DL search,
   prebuilt scientific-computing images, and GPU support are not implemented.
 - **Evaluation:** this version fits once at the training cutoff. It does not
@@ -143,6 +166,12 @@ evaluation windows and the rules for label availability.
 evaluator; manually checked 1/3/5-session labels match the source convention;
 features and labels respect their information cutoffs; restricted data remain
 outside version control.
+
+**Status (November 22):** fetch and build are implemented with a provisional
+universe rule (top companies by formation-date market cap) and one development
+window. Next: run the live fetch, check a few stocks' labels against CRSP by hand,
+agree on reserved final windows, and extend the loader for entries, exits, and
+covariates.
 
 ### Priority 1 Establish the First Real Comparison
 

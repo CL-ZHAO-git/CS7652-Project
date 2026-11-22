@@ -1,0 +1,29 @@
+# CRSP large-cap development window: train 2017-2018, validate 2019 Q1, test 2019 Q2.
+# Run from the repository root (same commands on macOS, Linux, and Windows):
+#   python scripts/crsp_data.py fetch configs/datasets/crsp_lc30_2017_2019.toml   # needs WRDS
+#   python scripts/crsp_data.py build configs/datasets/crsp_lc30_2017_2019.toml   # offline
+#   python -m forecast_agents run --config configs/crsp_demo.toml --output runs/<new-dir>
+# Outputs go under data/, which git ignores. Never commit CRSP data.
+
+name = "crsp_lc30_2017_2019"
+
+[window]
+start = "2017-01-03"  # first panel session; training starts here
+end = "2019-06-28"    # last panel session; the test period ends here
+# formation_date = "2016-12-30"  # default: the last CRSP session before start
+
+[universe]
+candidates = 100                 # companies fetched, ranked by formation-date market cap
+stocks = 30                      # companies kept: the highest-ranked with complete data
+share_codes = [10, 11]           # CRSP SHRCD: ordinary common shares
+exchange_codes = [1, 2, 3]       # CRSP EXCHCD: NYSE, NYSE American (AMEX), NASDAQ
+one_security_per_company = true  # largest share class per PERMCO (one Alphabet class)
+
+[panel]
+mode = "complete"  # only stocks with every session; survivorship-biased (see README)
+anonymize = true   # opaque symbols S000...; the PERMNO/ticker map stays under data/
+seed = 7652        # order in which symbols are assigned
+
+[output]
+raw_dir = "data/raw/crsp_lc30_2017_2019"
+panel = "data/panels/crsp_lc30_2017_2019.json"
