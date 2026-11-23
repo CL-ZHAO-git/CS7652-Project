@@ -1,0 +1,32 @@
+# CRSP large-cap DEVELOPMENT window, 2005-2014: build and tune agents and prompts here.
+# Run config: configs/crsp_dev_mock.toml (validate on 2008-2011 folds, test 2012-2014).
+# Run from the repository root (same commands on macOS, Linux, and Windows):
+#   python scripts/crsp_data.py fetch configs/datasets/crsp_lc30_2005_2014.toml   # needs WRDS
+#   python scripts/crsp_data.py build configs/datasets/crsp_lc30_2005_2014.toml   # offline
+# Outputs go under data/, which git ignores. Never commit CRSP data.
+
+name = "crsp_lc30_2005_2014"
+
+[window]
+start = "2005-01-03"  # first panel session
+end = "2014-12-31"    # last panel session
+# formation_date defaults to the last CRSP session before start (2004-12-31)
+
+[universe]
+candidates = 100                 # companies fetched, ranked by formation-date market cap
+stocks = 30                      # companies kept: the highest-ranked with complete data
+share_codes = [10, 11]           # CRSP SHRCD: ordinary common shares
+exchange_codes = [1, 2, 3]       # CRSP EXCHCD: NYSE, NYSE American (AMEX), NASDAQ
+one_security_per_company = true  # largest share class per PERMCO
+
+[panel]
+mode = "complete"  # only stocks with every session; survivorship-biased (see README)
+anonymize = true   # opaque symbols S000...; the PERMNO/ticker map stays under data/
+seed = 7652        # order in which symbols are assigned
+
+[output]
+raw_dir = "data/raw/crsp_lc30_2005_2014"
+panel = "data/panels/crsp_lc30_2005_2014.json"
+# Team reference build (fetched 2026-11-22): 30 stocks x 2,517 sessions. Dropped for
+# incomplete history: Wachovia (acquired 2008) and Dell (taken private 2013).
+expected_sha256 = "ff8d078c3cff1748e17753f527934bce83f3fbc7faed3476e152ccd047cc8a4d"

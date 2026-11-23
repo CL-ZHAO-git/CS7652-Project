@@ -1,8 +1,12 @@
+import hashlib
 import tempfile
 import unittest
 from pathlib import Path
 
-from forecast_agents.evaluation.evaluator import evaluate, freeze_solution, score, validate_predictions
+from platform_support import symlinks_supported
+
+from forecast_agents.evaluation.evaluator import (evaluate, freeze_solution, score, validate_predictions,
+                                                  zero_baseline)
 from forecast_agents.runtime.executor import Executor
 from forecast_agents.tasks.panel import Bar, Panel, TaskSpec, synthetic_panel
 from forecast_agents.templates import ZERO_CODE
@@ -26,7 +30,45 @@ def predict(history, state, horizons):
 '''
 
 
+FIT_DATE_CODE = '''def fit(history, horizons):
+    return {"fit_end": max(row["date"] for row in history)}
+
+def predict(history, state, horizons):
+    assert max(row["date"] for row in history) > state["fit_end"]
+    # Report which model made the forecast: the last date its fit could see.
+    value = float(state["fit_end"].replace("-", ""))
+    return [{"symbol": symbol, "horizon": h, "prediction": value, "risk": 0.0,
+             "abstain": False, "fallback": False}
+            for symbol in sorted({row["symbol"] for row in history}) for h in horizons]
+'''
+
+
 class EvaluationTests(unittest.TestCase):
+    def test_walk_forward_refits_each_block_on_history_through_its_cutoff(self):
+        panel = synthetic_panel(2, 300)  # weekdays from 2020-01-01 to early 2021
+        task = TaskSpec("2020-03-31", "2020-09-30", refit="quarter", validation_stride=10, test_stride=10)
+        with tempfile.TemporaryDirectory() as directory:
+            solution = Path(directory)
+            (solution / "pipeline.py").write_text(FIT_DATE_CODE)
+            validation = evaluate(panel, task, solution, Executor(), "validation")
+            test = evaluate(panel, task, solution, Executor(), "test")
+        self.assertEqual([b["fit_cutoff"] for b in validation["blocks"]], ["2020-03-31", "2020-06-30"])
+        self.assertEqual([b["fit_cutoff"] for b in test["blocks"]], ["2020-09-30", "2020-12-31"])
+        self.assertEqual(test["protocol"], "walk_forward_quarter")
+        for row in validation["rows"] + test["rows"]:
+            self.assertEqual(row["prediction"], float(row["fit_cutoff"].replace("-", "")))
+            self.assertGreater(row["origin"], row["fit_cutoff"])
+
+    def test_in_process_zero_baseline_matches_running_the_zero_pipeline(self):
+        panel = synthetic_panel(2, 300)
+        task = TaskSpec("2020-03-31", "2020-09-30", refit="quarter", test_stride=10)
+        with tempfile.TemporaryDirectory() as directory:
+            (Path(directory) / "pipeline.py").write_text(ZERO_CODE)
+            executed = evaluate(panel, task, Path(directory), Executor(), "test")
+        computed = zero_baseline(panel, task, "test")
+        for key in ("origins", "blocks", "metrics", "rows"):
+            self.assertEqual(computed[key], executed[key], key)
+
     def test_worker_gets_only_causal_prefixes_in_fresh_workspaces(self):
         panel = synthetic_panel(2, 24)
         task = TaskSpec(panel.dates[10], panel.dates[16])
@@ -81,7 +123,7 @@ class EvaluationTests(unittest.TestCase):
         self.assertEqual(len(metrics["risk_coverage"]), 1)
         self.assertEqual(metrics["risk_coverage"][0]["coverage"], 1.0)
 
-    def test_snapshot_hash_changes_with_source_and_rejects_symlinks(self):
+    def test_snapshot_hash_changes_with_source(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             source = root / "solution"
@@ -91,6 +133,28 @@ class EvaluationTests(unittest.TestCase):
             (source / "pipeline.py").write_text(ZERO_CODE + "\n# revision\n")
             second = freeze_solution(source, root / "second")
             self.assertNotEqual(first, second)
+
+    def test_snapshot_hash_is_identical_across_operating_systems(self):
+        files = {"pipeline.py": b"x = 1\n", "B.py": b"b\n", "a.py": b"a\n", "lib/helper.py": b"h\n"}
+        expected = hashlib.sha256()
+        # POSIX separators, case-sensitive order of path parts: "B.py" sorts before "a.py".
+        for name in ("B.py", "a.py", "lib/helper.py", "pipeline.py"):
+            expected.update(name.encode() + b"\0" + files[name] + b"\0")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "solution/lib").mkdir(parents=True)
+            for name, content in files.items():
+                (root / "solution" / name).write_bytes(content)
+            self.assertEqual(freeze_solution(root / "solution", root / "frozen"), expected.hexdigest())
+
+    @unittest.skipUnless(symlinks_supported(), "creating symlinks needs Developer Mode on Windows")
+    def test_snapshot_rejects_symlinks(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "solution"
+            source.mkdir()
+            (source / "pipeline.py").write_text(ZERO_CODE)
+            freeze_solution(source, root / "first")
             (source / "link").symlink_to(root / "first")
             with self.assertRaisesRegex(ValueError, "symlink"):
                 freeze_solution(source, root / "third")

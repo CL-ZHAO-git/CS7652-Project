@@ -12,5 +12,5 @@ class EventLog:
         self.sequence += 1
         record = {"sequence": self.sequence, "time": datetime.now(timezone.utc).isoformat(),
                   "event": kind, **fields}
-        with self.path.open("a", encoding="utf-8") as stream:
+        with self.path.open("a", encoding="utf-8", newline="\n") as stream:
             stream.write(json.dumps(record, allow_nan=False) + "\n")

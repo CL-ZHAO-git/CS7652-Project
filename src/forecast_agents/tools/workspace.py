@@ -2,7 +2,7 @@ import json
 from dataclasses import asdict
 from pathlib import Path
 
-from forecast_agents.evaluation.evaluator import evaluate, freeze_solution
+from forecast_agents.evaluation.evaluator import evaluate, freeze_solution, summary_metrics
 
 
 def _schema(name, description, properties, required):
@@ -13,13 +13,15 @@ def _schema(name, description, properties, required):
 
 STRING = {"type": "string"}
 STRINGS = {"type": "array", "items": STRING}
+PROTECTED_NAMES = {"task.json", "pipeline_contract.md"}
 TOOL_DEFINITIONS = (
     _schema("list_files", "List relative workspace files.", {}, []),
     _schema("read_file", "Read a workspace text file (bounded output).", {"path": STRING}, ["path"]),
     _schema("write_file", "Create or replace a workspace text file; data/ is read-only.",
             {"path": STRING, "content": STRING}, ["path", "content"]),
     _schema("run_python", "Run a workspace Python script with a bounded deadline.", {"path": STRING}, ["path"]),
-    _schema("validate_candidate", "Evaluate solution/ on historical validation only; no test feedback.", {}, []),
+    _schema("validate_candidate", "Evaluate solution/ on historical validation only, overall and per "
+            "walk-forward fold; no test feedback.", {}, []),
     _schema("finish_stage", "Finish this stage or request a bounded revision. Call this tool alone.",
             {"status": {"type": "string", "enum": ["completed", "revise", "rejected"]},
              "artifacts": STRINGS, "findings": STRINGS, "recommendations": STRINGS,
@@ -61,12 +63,16 @@ class WorkspaceTools:
         self.last_validation_hash = None
 
     def path(self, relative, write=False):
-        if not isinstance(relative, str) or not relative or Path(relative).is_absolute():
-            raise ValueError("A nonempty relative path is required")
+        # Forward-slash relative paths only, so tool behavior is identical on every OS.
+        if (not isinstance(relative, str) or not relative or Path(relative).is_absolute()
+                or relative.startswith("/") or "\\" in relative or ":" in relative):
+            raise ValueError("A nonempty relative path with forward slashes is required")
         target = (self.root / relative).resolve()
         if not target.is_relative_to(self.root) or target == self.root:
             raise ValueError("Path escapes the workspace")
-        if write and (target.is_relative_to(self.root / "data") or target.name in {"task.json", "PIPELINE_CONTRACT.md"}):
+        # Case-insensitive, because macOS and Windows file systems usually are.
+        parts = [part.casefold() for part in target.relative_to(self.root).parts]
+        if write and (parts[0] == "data" or parts[-1] in PROTECTED_NAMES):
             raise ValueError("Task inputs are read-only")
         return target
 
@@ -76,7 +82,7 @@ class WorkspaceTools:
             raise ValueError("Unknown tool")
         validate_arguments(arguments, definitions[name]["parameters"])
         if name == "list_files":
-            return {"files": sorted(str(p.relative_to(self.root)) for p in self.root.rglob("*")
+            return {"files": sorted(p.relative_to(self.root).as_posix() for p in self.root.rglob("*")
                                     if p.is_file() and not p.is_symlink())[:1000]}
         if name == "read_file":
             with self.path(arguments["path"]).open(encoding="utf-8") as stream:
@@ -87,7 +93,8 @@ class WorkspaceTools:
                 raise ValueError("Tool write exceeds 1 MB")
             path = self.path(arguments["path"], write=True)
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(arguments["content"], encoding="utf-8")
+            # newline="\n": the agent's exact text, not CRLF-translated on Windows.
+            path.write_text(arguments["content"], encoding="utf-8", newline="\n")
             return {"written": arguments["path"]}
         if name == "run_python":
             path = self.path(arguments["path"])
@@ -106,12 +113,11 @@ class WorkspaceTools:
                               self.execution_timeout, self.budget.remaining_seconds)
             target = self.root / "validation.json"
             # Validation targets are historical development data, never final targets.
-            target.write_text(json.dumps(report, indent=2), encoding="utf-8")
+            target.write_text(json.dumps(report, indent=2), encoding="utf-8", newline="\n")
             self.last_validation_hash = digest
             self.events.emit("validation", candidate_hash=digest, metrics=report["metrics"])
             return {"report": "validation.json", "candidate_hash": digest,
-                    "metrics": {h: {k: v for k, v in metrics.items() if k != "risk_coverage"}
-                                for h, metrics in report["metrics"].items()}}
+                    "metrics": summary_metrics(report["metrics"]), "folds": report["blocks"]}
         if name == "finish_stage":
             for artifact in arguments["artifacts"]:
                 if not self.path(artifact).is_file():

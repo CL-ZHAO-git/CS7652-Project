@@ -1,0 +1,31 @@
+# CRSP large-cap FINAL window, 2015-2024: reserved for the final experiments.
+# Run config: configs/crsp_final_mock.toml (validate on 2018-2021 folds, test 2022-2024).
+# Run from the repository root (same commands on macOS, Linux, and Windows):
+#   python scripts/crsp_data.py fetch configs/datasets/crsp_lc30_2015_2024.toml   # needs WRDS
+#   python scripts/crsp_data.py build configs/datasets/crsp_lc30_2015_2024.toml   # offline
+# Outputs go under data/, which git ignores. Never commit CRSP data.
+
+name = "crsp_lc30_2015_2024"
+
+[window]
+start = "2015-01-02"  # first panel session
+end = "2024-12-31"    # last panel session
+# formation_date defaults to the last CRSP session before start (2014-12-31)
+
+[universe]
+candidates = 100                 # companies fetched, ranked by formation-date market cap
+stocks = 30                      # companies kept: the highest-ranked with complete data
+share_codes = [10, 11]           # CRSP SHRCD: ordinary common shares
+exchange_codes = [1, 2, 3]       # CRSP EXCHCD: NYSE, NYSE American (AMEX), NASDAQ
+one_security_per_company = true  # largest share class per PERMCO
+
+[panel]
+mode = "complete"  # only stocks with every session; survivorship-biased (see README)
+anonymize = true   # opaque symbols S000...; the PERMNO/ticker map stays under data/
+seed = 7652        # order in which symbols are assigned
+
+[output]
+raw_dir = "data/raw/crsp_lc30_2015_2024"
+panel = "data/panels/crsp_lc30_2015_2024.json"
+# Team reference build (fetched 2026-11-22): 30 stocks x 2,516 sessions; none dropped.
+expected_sha256 = "5222aa09712b643f72cc7571ed0079998db2ec799fb1cc12e4b2855de07d81ed"

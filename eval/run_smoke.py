@@ -23,7 +23,8 @@ def main():
     result = {mode: {"status": s["status"], "candidate_hash": s.get("candidate_hash"),
                      "budget": s["budget"], "metrics": s.get("metrics")}
               for mode, s in summaries.items()}
-    (args.output_root / "comparison.json").write_text(json.dumps(result, indent=2) + "\n")
+    (args.output_root / "comparison.json").write_text(json.dumps(result, indent=2) + "\n",
+                                                      encoding="utf-8", newline="\n")
     print(json.dumps({mode: s["status"] for mode, s in summaries.items()}, indent=2))
     return 0 if all(s["status"] == "completed" for s in summaries.values()) else 1
 
