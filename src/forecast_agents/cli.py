@@ -10,11 +10,13 @@ from forecast_agents.agents.runner import AgentRunner
 from forecast_agents.config import config_record, load_config, validate_config
 from forecast_agents.evaluation.evaluator import evaluate, freeze_solution, summary_metrics, zero_baseline
 from forecast_agents.llm.backends import AnthropicBackend, OpenAICompatibleBackend
+from forecast_agents.llm.credentials import key_environment
 from forecast_agents.llm.mock import MockBackend
 from forecast_agents.orchestration.policies import run_policy
 from forecast_agents.runtime.budget import Budget
 from forecast_agents.runtime.events import EventLog
 from forecast_agents.runtime.executor import Executor
+from forecast_agents.runtime.errors import CandidateExecutionError
 from forecast_agents.tasks.panel import Bar, Panel, TaskSpec, synthetic_panel
 from forecast_agents.templates import PIPELINE_CONTRACT
 from forecast_agents.tools.workspace import WorkspaceTools
@@ -44,9 +46,11 @@ def run_experiment(config, output: Path):
     events = EventLog(output / "events.jsonl")
     budget = Budget(config.budget)
     summary = {"status": "running", "mode": config.mode, "backend": config.llm.backend,
+               "llm_data_access": "summaries_only" if config.data.source == "json" else "synthetic_previews",
                "mock": config.llm.backend == "mock", "config": config_record(config),
                "python": sys.version, "started": datetime.now(timezone.utc).isoformat()}
     _dump(output / "run.json", summary)
+    runner = None
     try:
         data = config.data
         if data.source == "synthetic":
@@ -87,37 +91,46 @@ def run_experiment(config, output: Path):
         if llm.backend == "mock":
             backend = MockBackend()
         elif llm.backend == "openai_compatible":
-            backend = OpenAICompatibleBackend(llm.model, llm.base_url, llm.api_key_env, llm.token_parameter)
+            backend = OpenAICompatibleBackend(llm.model, llm.base_url, llm.api_key_env, llm.token_parameter,
+                                              request_options=llm.request_options)
         else:
             backend = AnthropicBackend(llm.model, llm.base_url, llm.api_key_env)
         # The agent tool layer receives a development-only panel, not the full panel.
         development = Panel([Bar(**row) for row in panel.history(task.validation_end)])
         tools = WorkspaceTools(workspace, development, task, executor, budget, events,
-                               config.execution.timeout_seconds)
+                               config.execution.timeout_seconds, summaries_only=data.source == "json")
         runner = AgentRunner(backend, tools, budget, events,
-                             llm.max_output_tokens, llm.timeout_seconds)
+                             llm.max_output_tokens, llm.timeout_seconds, llm.max_context_chars,
+                             config.scheduling)
         handoffs = run_policy(config.mode, runner, config.max_revisions)
         _dump(output / "handoffs.json", handoffs)
         candidate_hash = freeze_solution(workspace / "solution", output / "submission")
         if candidate_hash != tools.last_validation_hash:
             raise ValueError("Final candidate differs from the last validated source snapshot")
+        if candidate_hash != tools.last_audit_hash:
+            raise ValueError("Final candidate has not passed the fixed development audit")
         budget.check()
         summary["agent_budget"] = budget.snapshot()
         summary["candidate_hash"] = candidate_hash
         events.emit("submission_frozen", candidate_hash=candidate_hash)
         # Final execution has its own common, recorded evaluation budget. No live LLM.
         report = evaluate(panel, task, output / "submission", executor, "test",
-                          config.execution.timeout_seconds, config.execution.evaluation_wall_seconds)
+                          config.execution.timeout_seconds, config.execution.evaluation_wall_seconds,
+                          require_prob_up=True)
         _dump(output / "test_report.json", report)
         _dump(output / "baseline_report.json", zero_baseline(panel, task, "test"))
         summary.update(status="completed", metrics=summary_metrics(report["metrics"]),
                        test_blocks=report["blocks"])
         events.emit("run_completed", candidate_hash=candidate_hash)
     except Exception as exc:
+        if isinstance(exc, CandidateExecutionError):
+            events.emit("candidate_execution_failure", operation=exc.operation, execution=asdict(exc.execution))
         summary.update(status="failed", error_type=type(exc).__name__, error=str(exc))
         events.emit("run_failed", error_type=type(exc).__name__, error=str(exc))
     finally:
         summary["budget"] = summary.get("agent_budget", budget.snapshot())
+        if runner is not None:
+            summary["stage_budgets"] = runner.stage_budgets()
         _dump(output / "run.json", summary)
     return summary
 
@@ -128,19 +141,24 @@ def main(argv=None):
     run = subparsers.add_parser("run")
     run.add_argument("--config", type=Path, default=Path("configs/demo.toml"))
     run.add_argument("--mode", choices=("single", "multi"))
+    run.add_argument("--key-file", type=Path, help="Read one sk- API key into the controller environment for this run")
     run.add_argument("--output", type=Path, required=True, help="New run directory; existing paths are never overwritten")
     args = parser.parse_args(argv)
     try:
         config = load_config(args.config)
         if args.mode:
             config = replace(config, mode=args.mode)
-        summary = run_experiment(config, args.output)
+        if args.key_file and config.llm.backend == "mock":
+            raise ValueError("Mock runs do not use an API key; omit --key-file")
+        with key_environment(config.llm.api_key_env, args.key_file):
+            summary = run_experiment(config, args.output)
     except (ValueError, OSError, TypeError) as exc:
         print(f"Configuration/run error: {exc}", file=sys.stderr)
         return 1
     print(json.dumps({"status": summary["status"], "mode": summary["mode"],
                       "mock": summary["mock"], "output": str(args.output),
-                      "error": summary.get("error")}, indent=2))
+                      "error": summary.get("error"), "budget": summary.get("budget"),
+                      "stage_budgets": summary.get("stage_budgets")}, indent=2))
     return 0 if summary["status"] == "completed" else 1
 
 

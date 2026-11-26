@@ -197,8 +197,17 @@ Calibrate operational thresholds on development/validation data. Compute
 post-hoc test risk-coverage curves without using them to tune the submitted
 system. Define catastrophic-error thresholds and invalid-run treatment in advance.
 
-Proposed prediction metrics are MAE and RMSE for each horizon, with a zero-return
-baseline. Additional reporting may include model-selection regret, catastrophic
+Point-forecast metrics are MAE, MSE and RMSE for each horizon, with a zero-return
+baseline. Direction classification uses `y = 1` for a strictly positive horizon
+return and `0` otherwise, including exactly zero. Candidates output `prob_up`
+learned/calibrated from historical data, scored using binary cross entropy and
+accuracy. Cross entropy uses natural logs and clips probabilities to
+`[1e-15, 1-1e-15]`; accuracy predicts up at `p >= 0.5`. The fixed direction baseline
+is `p=0.5`. Compare raw or served metrics on identical rows; served fallback uses
+probability 0.5. Legacy saved point forecasts cannot supply cross entropy without
+probabilities; do not retrospectively invent them from return/risk outputs.
+These metric additions change future frozen protocols, not earlier submissions.
+Additional reporting may include model-selection regret, catastrophic
 error rate, and resource cost. Inspect stock-level and time-period breakdowns as
 well as aggregates. Account for overlapping return horizons and dependence among
 stocks when estimating uncertainty; individual stock-date errors are not

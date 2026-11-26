@@ -1,4 +1,5 @@
 import math
+import json
 import os
 import tomllib
 from dataclasses import asdict, dataclass, field
@@ -7,7 +8,9 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from forecast_agents.runtime.budget import BudgetLimits
+from forecast_agents.runtime.scheduling import SchedulingConfig
 from forecast_agents.tasks.panel import TaskSpec
+from forecast_agents.llm.backends import chat_request_options
 
 
 @dataclass(frozen=True)
@@ -38,7 +41,9 @@ class LLMConfig:
     api_key_env: str = "LLM_API_KEY"
     token_parameter: str = "max_completion_tokens"
     max_output_tokens: int = 4096
+    max_context_chars: int = 32000
     timeout_seconds: float = 60
+    request_options: dict = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -59,17 +64,18 @@ class ExperimentConfig:
     llm: LLMConfig = field(default_factory=LLMConfig)
     execution: ExecutionConfig = field(default_factory=ExecutionConfig)
     budget: BudgetLimits = field(default_factory=BudgetLimits)
+    scheduling: SchedulingConfig = field(default_factory=SchedulingConfig)
 
 
 def load_config(path: Path) -> ExperimentConfig:
     with path.open("rb") as stream:
-        raw = tomllib.load(stream)
-    allowed = {"mode", "max_revisions", "data", "llm", "execution", "budget"}
+        raw = json.load(stream) if path.suffix == ".json" else tomllib.load(stream)
+    allowed = {"mode", "max_revisions", "data", "llm", "execution", "budget", "scheduling"}
     if set(raw) - allowed:
         raise ValueError("Unknown top-level configuration keys")
     sections = {}
     for name, cls in (("data", DataConfig), ("llm", LLMConfig),
-                      ("execution", ExecutionConfig), ("budget", BudgetLimits)):
+                      ("execution", ExecutionConfig), ("budget", BudgetLimits), ("scheduling", SchedulingConfig)):
         values = dict(raw.get(name, {}))
         for key, value in values.items():
             if isinstance(value, str) and value.startswith("${") and value.endswith("}"):
@@ -83,7 +89,10 @@ def load_config(path: Path) -> ExperimentConfig:
             for key in ("train_end", "validation_end"):
                 if type(values.get(key)) is date:  # unquoted TOML date
                     values[key] = values[key].isoformat()
-            if {"train_end", "validation_end"} & set(values) and {"train_sessions", "validation_sessions"} & set(values):
+            # Normalized JSON snapshots include all dataclass defaults, including
+            # inactive split fields. TOML authored by users must choose one form.
+            if (path.suffix != ".json" and {"train_end", "validation_end"} & set(values)
+                    and {"train_sessions", "validation_sessions"} & set(values)):
                 raise ValueError("Use data.train_end/validation_end dates or session counts, not both")
         try:
             sections[name] = cls(**values)
@@ -114,6 +123,15 @@ def validate_config(config: ExperimentConfig) -> ExperimentConfig:
             raise ValueError("Model and credential environment-variable name are required")
     if config.llm.token_parameter not in {"max_tokens", "max_completion_tokens"}:
         raise ValueError("Unsupported token parameter")
+    chat_request_options(config.llm.request_options)
+    if config.llm.request_options and config.llm.backend != "openai_compatible":
+        raise ValueError("request_options is implemented only for openai_compatible")
+    if (config.scheduling.force_tool_choice and config.llm.backend == "openai_compatible" and
+            urlsplit(config.llm.base_url).hostname == "api.deepseek.com"):
+        thinking = config.llm.request_options.get("thinking", {}).get("type")
+        effort = config.llm.request_options.get("reasoning_effort")
+        if thinking != "disabled" and not (thinking is None and effort == "none"):
+            raise ValueError("Forced tool choice on DeepSeek requires explicit non-thinking mode")
     if config.data.source not in {"synthetic", "json"}:
         raise ValueError("Data source must be synthetic or json")
     for key in ("stocks", "sessions", "train_sessions", "validation_sessions"):
@@ -126,6 +144,8 @@ def validate_config(config: ExperimentConfig) -> ExperimentConfig:
         raise ValueError("Execution and generation limits must be finite and positive")
     if type(config.llm.max_output_tokens) is not int or type(config.execution.memory_mb) is not int:
         raise ValueError("Token and memory limits must be integers")
+    if type(config.llm.max_context_chars) is not int or config.llm.max_context_chars < 4000:
+        raise ValueError("llm.max_context_chars must be an integer of at least 4000")
     TaskSpec("2000-01-01", "2000-01-02", config.data.horizons, config.data.refit,
              config.data.validation_stride, config.data.test_stride)
     boundaries =(config.data.train_end, config.data.validation_end)

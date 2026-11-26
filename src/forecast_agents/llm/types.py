@@ -46,6 +46,10 @@ class ModelRequest:
     max_output_tokens: int
     timeout_seconds: float
     stage: str = ""
+    # Controller metadata for deterministic fixtures; never sent to providers.
+    turn_index: int | None = None
+    # "required" or the name of an available tool; None preserves provider defaults.
+    tool_choice: str | None = None
 
 
 @dataclass(frozen=True)

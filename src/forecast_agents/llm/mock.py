@@ -32,7 +32,7 @@ class MockBackend:
                          ("validate_candidate", {}), _finish(["solution/pipeline.py"])],
             "auditing": [_write("audit.py", templates.AUDIT_CODE),
                          ("run_python", {"path": "audit.py"}),
-                         ("validate_candidate", {}), _finish(["audit.json"])],
+                         ("validate_candidate", {}), ("audit_candidate", {}), _finish(["audit.json"])],
         }
         plans["single"] = [step for name in ("diagnosis", "features", "modeling", "auditing")
                            for step in plans[name] if step[0] != "finish_stage"]
@@ -41,7 +41,8 @@ class MockBackend:
         if request.messages[-1].role == "tool":
             if json.loads(request.messages[-1].text).get("is_error"):
                 raise RuntimeError("Mock fixture tool failed; inspect events.jsonl")
-        index = sum(m.role == "assistant" for m in request.messages)
+        index = (request.turn_index if request.turn_index is not None else
+                 sum(m.role == "assistant" for m in request.messages))
         if request.stage not in plans or index >= len(plans[request.stage]):
             raise RuntimeError("Mock plan exhausted")
         name, arguments = plans[request.stage][index]

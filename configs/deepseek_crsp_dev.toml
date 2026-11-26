@@ -1,0 +1,55 @@
+# Real CRSP DEVELOPMENT data. Raw rows, runtime files and arbitrary stdout/stderr
+# remain local. JSON panels automatically enable summaries-only LLM feedback.
+mode = "multi"
+max_revisions = 1
+
+[data]
+source = "json"
+path = "data/panels/crsp_lc30_2005_2014.json"
+train_end = "2007-12-31"
+validation_end = "2011-12-31"
+refit = "year"
+validation_stride = 5
+test_stride = 1
+horizons = [1, 3, 5]
+
+[llm]
+backend = "openai_compatible"
+model = "deepseek-flash"
+base_url = "https://api.deepseek.com"
+api_key_env = "DEEPSEEK_API_KEY"
+token_parameter = "max_tokens"
+max_output_tokens = 4096
+max_context_chars = 32000
+timeout_seconds = 60
+
+[llm.request_options]
+thinking = { type = "disabled" }
+
+[execution]
+mode = "docker"
+image = "python:3.13-slim"
+cpus = 1.0
+memory_mb = 1024
+timeout_seconds = 120
+evaluation_wall_seconds = 3600
+
+[budget]
+max_llm_calls = 80
+max_total_tokens = 600000
+max_tool_calls = 240
+# Multiple yearly validation fits and per-origin Docker execution take longer.
+wall_seconds = 7200
+
+[scheduling]
+enabled = true
+diagnosis_share = 0.15
+features_share = 0.15
+modeling_share = 0.45
+auditing_share = 0.25
+finish_only_fraction = 0.8
+finish_call_reserve = 2
+finish_output_tokens = 1024
+input_token_margin = 1024
+force_tool_choice = true
+max_policy_corrections = 1

@@ -3,6 +3,7 @@ import sys
 import tempfile
 import time
 import unittest
+from types import SimpleNamespace
 from pathlib import Path
 from unittest.mock import patch
 
@@ -12,6 +13,7 @@ from forecast_agents.agents.runner import AgentRunner
 from forecast_agents.llm.types import Message, ModelResponse, ToolCall, Usage
 from forecast_agents.orchestration.policies import run_policy
 from forecast_agents.runtime.budget import Budget, BudgetExceeded, BudgetLimits
+from forecast_agents.runtime.scheduling import SchedulingConfig
 from forecast_agents.runtime.events import EventLog
 from forecast_agents.runtime.executor import Executor
 from forecast_agents.tools.workspace import WorkspaceTools
@@ -149,7 +151,8 @@ class RuntimeTests(unittest.TestCase):
                 budget = Budget(BudgetLimits(max_total_tokens=50))
                 events = EventLog(root / "events.jsonl")
                 tools = WorkspaceTools(root, None, None, None, budget, events)
-                runner = AgentRunner(ScriptedBackend([model_response]), tools, budget, events)
+                runner = AgentRunner(ScriptedBackend([model_response]), tools, budget, events,
+                                     scheduling=SchedulingConfig(enabled=False))
                 with self.assertRaises(RuntimeError):
                     runner.run_stage("diagnosis", [])
                 self.assertFalse((root / "bad").exists())
@@ -169,12 +172,87 @@ class RuntimeTests(unittest.TestCase):
             records = [json.loads(line) for line in events.path.read_text().splitlines()]
             self.assertTrue(any(row["event"] == "model_response" for row in records))
 
+    def test_budget_notices_refresh_without_accumulating_or_forcing_completion(self):
+        class RecordingBackend(ScriptedBackend):
+            def __init__(self, responses):
+                super().__init__(responses)
+                self.requests = []
+
+            def generate(self, request):
+                self.requests.append(request)
+                return super().generate(request)
+
+        finish = {"status": "completed", "artifacts": ["diagnostics.json"],
+                  "findings": ["Fixture check"], "recommendations": [], "next_role": ""}
+        backend = RecordingBackend([
+            response("write_file", {"path": "diagnostics.json", "content": "{}"}, Usage(13000, 0)),
+            # Essential artifact repair is still allowed after advisory wrap-up.
+            response("write_file", {"path": "diagnostics.json", "content": '{"checked": true}'}),
+            response("finish_stage", finish), response("finish_stage", finish),
+        ])
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            budget = Budget(BudgetLimits(max_llm_calls=40, max_total_tokens=100000))
+            events = EventLog(root / "events.jsonl")
+            tools = WorkspaceTools(root, None, None, None, budget, events)
+            runner = AgentRunner(backend, tools, budget, events, scheduling=SchedulingConfig(enabled=False))
+            result = runner.run_stage("diagnosis", [])
+            self.assertEqual(result["status"], "completed")
+            self.assertTrue(json.loads((root / "diagnostics.json").read_text())["checked"])
+            runner.run_stage("features", [result])
+
+            notices = []
+            for request in backend.requests:
+                messages = [m for m in request.messages if m.text.startswith("Controller budget status")]
+                self.assertEqual(len(messages), 1)
+                notices.append(json.loads(messages[0].text.splitlines()[1]))
+            self.assertEqual([n["action"] for n in notices], ["work", "wrap_up", "wrap_up", "work"])
+            self.assertEqual(notices[1]["shared_tokens_remaining"], 87000)
+            self.assertEqual(notices[1]["stage_tokens_used"], 13000)
+            self.assertEqual(notices[1]["stage_calls_completed"], 1)
+            self.assertEqual(notices[0]["stage_call_limit"], 6)
+            self.assertEqual(notices[3]["stage_tokens_used"], 0)
+            self.assertEqual(notices[3]["shared_tokens_remaining"], 86996)
+            # Fresh stage guidance does not reset the shared ledger or strip tool pairs.
+            self.assertEqual(budget.total_tokens, 13006)
+            self.assertEqual(backend.requests[1].messages[-2].role, "assistant")
+            self.assertEqual(backend.requests[1].messages[-1].role, "tool")
+            self.assertFalse(any(m.text.startswith("Controller budget status")
+                                 for m in runner.histories["diagnosis"]))
+
+    def test_single_agent_receives_full_stage_budget(self):
+        budget = Budget(BudgetLimits(max_llm_calls=40, max_total_tokens=100000))
+        runner = AgentRunner(None, None, budget, None)
+        notice = runner._progress("single")
+        self.assertEqual(notice["stage_call_limit"], 40)
+        self.assertEqual(notice["stage_token_limit"], 100000)
+        self.assertEqual(notice["shared_calls_remaining_including_this_request"], 40)
+
     def test_revision_limit_stops_cycles(self):
         class RevisingRunner:
             def run_stage(self, role, handoffs):
                 return {"role": role, "status": "revise", "next_role": "features"}
         with self.assertRaisesRegex(RuntimeError, "Revision limit"):
             run_policy("multi", RevisingRunner(), max_revisions=1)
+
+    def test_revision_cannot_reenter_a_finish_only_target(self):
+        class RevisingRunner:
+            def __init__(self, finalizing):
+                self.roles = []
+                self.allowances = {"diagnosis": SimpleNamespace(finalizing=finalizing)}
+
+            def run_stage(self, role, handoffs):
+                self.roles.append(role)
+                return {"role": role, "status": "revise", "next_role": "diagnosis"}
+
+        runner = RevisingRunner(True)
+        with self.assertRaisesRegex(RuntimeError, "already finish-only"):
+            run_policy("multi", runner, max_revisions=1)
+        self.assertEqual(runner.roles, ["diagnosis"])
+        runner = RevisingRunner(False)
+        with self.assertRaisesRegex(RuntimeError, "Revision limit"):
+            run_policy("multi", runner, max_revisions=1)
+        self.assertEqual(runner.roles, ["diagnosis", "diagnosis"])
 
     def test_nonfinal_roles_cannot_bypass_audit_by_finishing(self):
         class CompletingRunner:

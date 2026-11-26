@@ -8,6 +8,9 @@ from itertools import groupby
 from pathlib import Path
 
 from forecast_agents.tasks.panel import Panel, TaskSpec
+from forecast_agents.runtime.errors import CandidateExecutionError, PredictionContractError
+
+DIRECTION_EPSILON = 1e-15
 
 
 def freeze_solution(source: Path, destination: Path):
@@ -37,37 +40,70 @@ def freeze_solution(source: Path, destination: Path):
     return digest.hexdigest()
 
 
-def validate_predictions(predictions, symbols, horizons):
+def validate_predictions(predictions, symbols, horizons, require_prob_up=False):
     if not isinstance(predictions, list):
-        raise ValueError("Prediction output must be a list")
+        raise PredictionContractError("Prediction output must be a list")
     expected = {(symbol, h) for symbol in symbols for h in horizons}
     seen = set()
+    probability_rows = 0
     for row in predictions:
-        if not isinstance(row, dict) or set(row) != {"symbol", "horizon", "prediction", "risk", "abstain", "fallback"}:
-            raise ValueError("Prediction row has missing or unexpected fields")
+        required = {"symbol", "horizon", "prediction", "risk", "abstain", "fallback"}
+        if not isinstance(row, dict) or not required.issubset(row) or set(row) - required - {"prob_up"}:
+            raise PredictionContractError("Prediction row has missing or unexpected fields")
         if not isinstance(row["symbol"], str) or type(row["horizon"]) is not int:
-            raise ValueError("Invalid stock or horizon type")
+            raise PredictionContractError("Invalid stock or horizon type")
         key = (row["symbol"], row["horizon"])
         if key not in expected or key in seen:
-            raise ValueError("Unexpected or duplicate stock-horizon prediction")
+            raise PredictionContractError("Unexpected or duplicate stock-horizon prediction")
         seen.add(key)
         for field in ("prediction", "risk"):
             if type(row[field]) not in (int, float) or not math.isfinite(row[field]):
-                raise ValueError("Predictions and risks must be finite numbers")
+                raise PredictionContractError("Predictions and risks must be finite numbers")
         if row["risk"] < 0 or any(type(row[f]) is not bool for f in ("abstain", "fallback")):
-            raise ValueError("Risk must be nonnegative and decisions must be booleans")
+            raise PredictionContractError("Risk must be nonnegative and decisions must be booleans")
         if row["abstain"] and row["fallback"]:
-            raise ValueError("Abstention and fallback are distinct decisions")
+            raise PredictionContractError("Abstention and fallback are distinct decisions")
+        if "prob_up" in row:
+            probability_rows += 1
+            p = row["prob_up"]
+            if type(p) not in (int, float) or not math.isfinite(p) or not 0 <= p <= 1:
+                raise PredictionContractError("prob_up must be a finite probability in [0, 1]")
     if seen != expected:
-        raise ValueError("Incomplete stock-horizon coverage")
+        raise PredictionContractError("Incomplete stock-horizon coverage")
+    if probability_rows not in (0, len(predictions)):
+        raise PredictionContractError("Provide prob_up for every row or omit it from every row")
+    if require_prob_up and probability_rows != len(predictions):
+        raise PredictionContractError("New candidates must include prob_up for every stock and horizon to score direction cross entropy")
 
 
 def _loss(rows, prediction_key):
     if not rows:
-        return {"mae": None, "rmse": None}
+        return {"mae": None, "mse": None, "rmse": None}
     errors = [row[prediction_key] - row["target"] for row in rows]
+    mse = sum(e * e for e in errors) / len(errors)
     return {"mae": sum(abs(e) for e in errors) / len(errors),
-            "rmse": math.sqrt(sum(e * e for e in errors) / len(errors))}
+            "mse": mse, "rmse": math.sqrt(mse)}
+
+
+def _direction_loss(rows, use_fallback=False, baseline=False):
+    """BCE needs probabilities, never a return forecast or an uncalibrated risk."""
+    probabilities = [0.5 if baseline or (use_fallback and row["fallback"])
+                     else row.get("prob_up") for row in rows]
+    for p in probabilities:
+        if p is not None and (type(p) not in (int, float) or not math.isfinite(p) or not 0 <= p <= 1):
+            raise ValueError("prob_up must be a finite probability in [0, 1]")
+    count = sum(p is not None for p in probabilities)
+    result = {"count": len(rows), "probability_count": count, "cross_entropy": None, "accuracy": None}
+    # Do not silently score only the rows whose probabilities happen to exist.
+    if not rows or count != len(rows):
+        return result
+    loss = correct = 0
+    for row, probability in zip(rows, probabilities):
+        label = int(row["target"] > 0)  # Zero returns belong to the non-up class.
+        p = min(1 - DIRECTION_EPSILON, max(DIRECTION_EPSILON, probability))
+        loss -= math.log(p) if label else math.log1p(-p)
+        correct += int((probability >= 0.5) == bool(label))
+    return {**result, "cross_entropy": loss / len(rows), "accuracy": correct / len(rows)}
 
 
 def score(rows, horizons):
@@ -87,13 +123,20 @@ def score(rows, horizons):
                 absolute_error += abs(error)
                 squared_error += error * error
             curve.append({"risk_threshold": risk, "coverage": count / len(group),
-                          "mae": absolute_error / count, "rmse": math.sqrt(squared_error / count)})
+                          "mae": absolute_error / count, "mse": squared_error / count,
+                          "rmse": math.sqrt(squared_error / count)})
         baseline = [{**row, "zero": 0.0} for row in group]
+        served_baseline = [{**row, "zero": 0.0} for row in served]
         result[str(h)] = {
             "count": len(group), "coverage": len(served) / len(group) if group else 0,
+            "served_count": len(served), "abstained_count": len(group) - len(served),
             "fallback_rate": sum(row["fallback"] for row in group) / len(group) if group else 0,
             "served": _loss(served, "effective_prediction"),
             "raw": _loss(group, "prediction"), "zero_baseline": _loss(baseline, "zero"),
+            "zero_baseline_served": _loss(served_baseline, "zero"),
+            "direction": {"raw": _direction_loss(group), "served": _direction_loss(served, use_fallback=True),
+                          "half_probability_baseline": _direction_loss(group, baseline=True),
+                          "half_probability_baseline_served": _direction_loss(served, baseline=True)},
             "risk_coverage": curve,
         }
     return result
@@ -124,7 +167,7 @@ def zero_baseline(panel: Panel, task: TaskSpec, split="test"):
     started = time.monotonic()
     blocks = panel.blocks(task, split)
     label_cutoff = task.validation_end if split == "validation" else panel.dates[-1]
-    rows_by_block = [[{"symbol": symbol, "horizon": h, "prediction": 0.0, "risk": 0.0,
+    rows_by_block = [[{"symbol": symbol, "horizon": h, "prediction": 0.0, "prob_up": 0.5, "risk": 0.0,
                        "abstain": False, "fallback": False, "origin": origin,
                        "fit_cutoff": block.fit_cutoff, "effective_prediction": 0.0,
                        "target": panel.label(symbol, origin, h, label_cutoff)}
@@ -133,8 +176,27 @@ def zero_baseline(panel: Panel, task: TaskSpec, split="test"):
     return _report(split, task, blocks, rows_by_block, started)
 
 
+def invoke_candidate(solution, executor, operation, history, horizons, state=None,
+                     origin=None, timeout_seconds=10.0):
+    """Run one candidate operation in a fresh workspace; never call the LLM."""
+    worker = Path(__file__).with_name("worker.py")
+    with tempfile.TemporaryDirectory(prefix="forecast-eval-", ignore_cleanup_errors=True) as directory:
+        root = Path(directory)
+        freeze_solution(solution, root / "solution")
+        shutil.copyfile(worker, root / "worker.py")
+        payload = {"operation": operation, "history": history, "state": state,
+                   "horizons": horizons, "origin": origin}
+        execution = executor.execute(root, "worker.py", json.dumps(payload), timeout=timeout_seconds)
+        if execution.timed_out or execution.returncode:
+            raise CandidateExecutionError(operation, execution)
+        path = root / "result.json"
+        if not path.is_file() or path.is_symlink() or path.stat().st_size > 10 * 1024 * 1024:
+            raise ValueError("Candidate did not produce a bounded JSON result")
+        return json.loads(path.read_text(encoding="utf-8"))
+
+
 def evaluate(panel: Panel, task: TaskSpec, solution: Path, executor, split="test",
-             timeout_seconds=10.0, wall_seconds=120.0):
+             timeout_seconds=10.0, wall_seconds=120.0, require_prob_up=False):
     """Fit each block at its cutoff; predict in fresh processes on strictly causal prefixes.
 
     Final labels remain in this controller. No per-origin workspace contains the
@@ -142,28 +204,13 @@ def evaluate(panel: Panel, task: TaskSpec, solution: Path, executor, split="test
     """
     started = time.monotonic()
     blocks = panel.blocks(task, split)
-    worker = Path(__file__).with_name("worker.py")
 
     def invoke(operation, history, state=None):
         remaining = wall_seconds - (time.monotonic() - started)
         if remaining <= 0:
             raise TimeoutError("Evaluation wall-time limit exhausted")
-        # Every call uses a new folder, so a folder left behind by a transient file lock
-        # (for example antivirus scanning on Windows) cannot leak into another origin.
-        with tempfile.TemporaryDirectory(prefix="forecast-eval-", ignore_cleanup_errors=True) as directory:
-            root = Path(directory)
-            freeze_solution(solution, root / "solution")
-            shutil.copyfile(worker, root / "worker.py")
-            payload = {"operation": operation, "history": history,
-                       "state": state, "horizons": task.horizons}
-            execution = executor.execute(root, "worker.py", json.dumps(payload),
-                                         timeout=min(timeout_seconds, remaining))
-            if execution.timed_out or execution.returncode:
-                raise RuntimeError(f"Candidate {operation} failed: {execution.stderr[:2000]}")
-            path = root / "result.json"
-            if not path.is_file() or path.is_symlink() or path.stat().st_size > 10 * 1024 * 1024:
-                raise ValueError("Candidate did not produce a bounded JSON result")
-            return json.loads(path.read_text(encoding="utf-8"))
+        return invoke_candidate(solution, executor, operation, history, task.horizons,
+                                state=state, timeout_seconds=min(timeout_seconds, remaining))
 
     label_cutoff = task.validation_end if split == "validation" else panel.dates[-1]
     rows_by_block = []
@@ -172,7 +219,7 @@ def evaluate(panel: Panel, task: TaskSpec, solution: Path, executor, split="test
         rows = []
         for origin in block.origins:
             predictions = invoke("predict", panel.history(origin), state)
-            validate_predictions(predictions, panel.symbols, task.horizons)
+            validate_predictions(predictions, panel.symbols, task.horizons, require_prob_up=require_prob_up)
             for prediction in predictions:
                 row = {**prediction, "origin": origin, "fit_cutoff": block.fit_cutoff,
                        "target": panel.label(prediction["symbol"], origin,

@@ -14,7 +14,11 @@ def run_policy(mode, runner, max_revisions=1):
             revisions += 1
             if revisions > max_revisions:
                 raise RuntimeError("Revision limit exhausted; candidate not accepted")
-            stage = "single" if mode == "single" else result["next_role"]
+            target = "single" if mode == "single" else result["next_role"]
+            allowance = getattr(runner, "allowances", {}).get(target)
+            if allowance is not None and allowance.finalizing:
+                raise RuntimeError(f"Revision target {target} is already finish-only; code work cannot reopen")
+            stage = target
             continue
         if stage in {"single", "auditing"}:
             return handoffs

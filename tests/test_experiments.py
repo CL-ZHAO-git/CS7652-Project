@@ -22,6 +22,8 @@ class ExperimentTests(unittest.TestCase):
                 summary = run_experiment(replace(self.config(), mode=mode), root)
                 self.assertEqual(summary["status"], "completed", summary.get("error"))
                 self.assertTrue(summary["mock"])
+                self.assertEqual(sum(s["total_tokens"] for s in summary["stage_budgets"].values()),
+                                 summary["budget"]["total_tokens"])
                 outputs[mode] = summary["candidate_hash"]
                 events = [json.loads(line) for line in (root / "events.jsonl").read_text().splitlines()]
                 stages = [row["role"] for row in events if row["event"] == "stage_started"]
@@ -34,6 +36,10 @@ class ExperimentTests(unittest.TestCase):
                 self.assertLess(max(r["date"] for r in visible), max(r["date"] for r in private))
                 report = json.loads((root / "test_report.json").read_text())
                 self.assertEqual(set(report["metrics"]), {"1", "3", "5"})
+                for metric in report["metrics"].values():
+                    self.assertIsNotNone(metric["raw"]["mse"])
+                    self.assertIsNotNone(metric["direction"]["raw"]["cross_entropy"])
+                    self.assertEqual(metric["direction"]["raw"]["probability_count"], metric["count"])
                 self.assertTrue(all(row["origin"] > max(r["date"] for r in visible)
                                     for row in report["rows"]))
             self.assertEqual(outputs["single"], outputs["multi"])
@@ -43,7 +49,7 @@ class ExperimentTests(unittest.TestCase):
             root = Path(directory) / "failed"
             summary = run_experiment(replace(self.config(), budget=BudgetLimits(max_llm_calls=1)), root)
             self.assertEqual(summary["status"], "failed")
-            self.assertEqual(summary["error_type"], "BudgetExceeded")
+            self.assertIn(summary["error_type"], {"BudgetExceeded", "StageBudgetExceeded"})
             self.assertFalse((root / "test_report.json").exists())
             with self.assertRaises(FileExistsError):
                 run_experiment(self.config(), root)

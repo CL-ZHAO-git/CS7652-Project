@@ -35,16 +35,41 @@ def _calls(calls):
     return tuple(calls)
 
 
+def chat_request_options(options):
+    """Allow explicit reasoning controls without overriding tools or credentials."""
+    if not isinstance(options, dict) or set(options) - {"thinking", "reasoning_effort"}:
+        raise ValueError("request_options supports only thinking and reasoning_effort")
+    if "thinking" in options:
+        thinking = options["thinking"]
+        if (not isinstance(thinking, dict) or set(thinking) != {"type"}
+                or thinking["type"] not in ("enabled", "disabled")):
+            raise ValueError("thinking must be {type: enabled} or {type: disabled}")
+    if "reasoning_effort" in options and options["reasoning_effort"] not in (
+            "none", "minimal", "low", "medium", "high", "xhigh", "max"):
+        raise ValueError("Unsupported reasoning_effort")
+    return json.loads(json.dumps(options))
+
+
+def _tool_choice(request):
+    choice = request.tool_choice
+    if choice is not None and not isinstance(choice, str):
+        raise BackendError("Tool choice must be a string", Usage(0, 0))
+    if choice is not None and choice != "required" and choice not in {t["name"] for t in request.tools}:
+        raise BackendError("Requested tool choice is unavailable", Usage(0, 0))
+    return choice
+
+
 class OpenAICompatibleBackend:
     name = "openai_compatible"
 
     def __init__(self, model, base_url, api_key_env, token_parameter="max_completion_tokens",
-                 transport: Transport = post_json):
+                 transport: Transport = post_json, request_options=None):
         if token_parameter not in {"max_tokens", "max_completion_tokens"}:
             raise ValueError("Unsupported token limit parameter")
         self.model, self.base_url = model, base_url.rstrip("/")
         self.api_key_env, self.token_parameter = api_key_env, token_parameter
         self.transport = transport
+        self.request_options = chat_request_options(request_options if request_options is not None else {})
 
     def generate(self, request: ModelRequest) -> ModelResponse:
         messages = []
@@ -67,6 +92,11 @@ class OpenAICompatibleBackend:
             self.token_parameter: request.max_output_tokens,
             "tools": [{"type": "function", "function": tool} for tool in request.tools],
         }
+        payload.update(self.request_options)
+        choice = _tool_choice(request)
+        if choice is not None:
+            payload["tool_choice"] = ("required" if choice == "required" else
+                                      {"type": "function", "function": {"name": choice}})
         key = os.environ.get(self.api_key_env)
         if not key:
             raise BackendError(f"Missing credential environment variable: {self.api_key_env}", Usage(0, 0))
@@ -131,6 +161,9 @@ class AnthropicBackend:
             "tools": [{"name": t["name"], "description": t["description"],
                        "input_schema": t["parameters"]} for t in request.tools],
         }
+        choice = _tool_choice(request)
+        if choice is not None:
+            payload["tool_choice"] = {"type": "any"} if choice == "required" else {"type": "tool", "name": choice}
         raw = self.transport(self.base_url + "/messages",
                              {"x-api-key": key, "anthropic-version": "2023-06-01"},
                              payload, request.timeout_seconds)
