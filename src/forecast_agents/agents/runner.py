@@ -2,7 +2,7 @@ import json
 from dataclasses import asdict
 
 from forecast_agents.llm.types import BackendError, Message, ModelRequest, Usage, as_json
-from forecast_agents.agents.context import request_context, working_state
+from forecast_agents.agents.context import finalization_context, request_context, working_state
 from forecast_agents.runtime.scheduling import SchedulingConfig, StageAllowance, StageBudgetExceeded
 from forecast_agents.tools.privacy import DataAccessError
 
@@ -128,7 +128,9 @@ class AgentRunner:
                                 if not finish_only or tool["name"] in allowed_names)
             # Closing audit/single may still need the mandatory audit, and modeling
             # may need validation. A correction must not hide those essential tools.
-            force_finish = finish_only and role in {"diagnosis", "features"}
+            checked_finalization = (finish_only and role in {"auditing", "single"}
+                                    and self.tools.audit_is_current())
+            force_finish = finish_only and (role in {"diagnosis", "features"} or checked_finalization)
             if force_finish:
                 definitions = tuple(tool for tool in definitions if tool["name"] == "finish_stage")
                 allowed_names = {"finish_stage"}
@@ -147,12 +149,16 @@ class AgentRunner:
                              "A token target is not a tokenizer guarantee; the next input also consumes budget.")
             # Replace the notice on every call without accumulating reminders or
             # interrupting assistant/tool-result pairs in either provider protocol.
-            request_messages, context_info = request_context(messages, notice, self.max_context_chars)
+            if checked_finalization:
+                request_messages, context_info = finalization_context(messages, notice, self.tools.last_validation_hash)
+            else:
+                request_messages, context_info = request_context(messages, notice, self.max_context_chars)
             turn_index = sum(m.role == "assistant" for m in messages)
             output_limit = min(self.max_output_tokens, allowance.remaining_tokens)
             estimate = None
             if self.scheduling.enabled:
-                estimate = allowance.estimate_input(context_info["context_chars"], len(json.dumps(definitions)))
+                estimate = allowance.estimate_input(context_info["context_chars"], len(json.dumps(definitions)),
+                                                    compact_finalization=checked_finalization)
                 output_limit = min(output_limit, allowance.remaining_tokens - estimate)
                 if finish_only:
                     output_limit = min(output_limit, self.scheduling.finish_output_tokens)

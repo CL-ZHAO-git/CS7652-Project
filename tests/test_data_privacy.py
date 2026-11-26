@@ -22,6 +22,28 @@ SECRET = "PRIVATE_ROW_SENTINEL_938172"
 
 
 class PrivacyTests(unittest.TestCase):
+    def test_oversized_read_returns_public_bounds_and_recovers_with_pagination(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            tools = self.tools(root)
+            source = "# Authored source\n" * 700
+            tools.execute("write_file", {"path": "solution/pipeline.py", "content": source})
+            definition = next(t for t in tools.definitions if t["name"] == "read_file")
+            self.assertEqual(definition["parameters"]["properties"]["max_chars"]["maximum"], 8000)
+            self.assertIn("8000", definition["description"])
+            first = tools.execute("read_file", {"path": "solution/pipeline.py"})
+            with self.assertRaises(DataAccessError) as caught:
+                tools.execute("read_file", {"path": "solution/pipeline.py", "offset": first["next_offset"], "max_chars": 12000})
+            feedback = tools.error_result(caught.exception)
+            self.assertIn("8000", feedback["error"])
+            self.assertIn("next_offset", feedback["error"])
+            self.assertNotIn(SECRET, json.dumps(feedback))
+            last = tools.execute("read_file", {"path": "solution/pipeline.py", "offset": first["next_offset"], "max_chars": 8000})
+            self.assertEqual(first["text"] + last["text"], source)
+            self.assertIsNone(last["next_offset"])
+            with self.assertRaises(DataAccessError):
+                tools.execute("read_file", {"path": "data/history.json", "max_chars": 8000})
+
     def tools(self, root, executor=None):
         (root / "data").mkdir()
         (root / "data/history.json").write_text(SECRET)

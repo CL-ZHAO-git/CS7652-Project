@@ -5,11 +5,13 @@ from pathlib import Path
 
 from forecast_agents.agents.runner import AgentRunner
 from forecast_agents.config import load_config
+from forecast_agents.evaluation.evaluator import freeze_solution
 from forecast_agents.llm.types import Message, ModelResponse, ToolCall, Usage
 from forecast_agents.runtime.budget import Budget, BudgetLimits
 from forecast_agents.runtime.events import EventLog
 from forecast_agents.runtime.scheduling import SchedulingConfig, StageAllowance, StageBudgetExceeded
 from forecast_agents.tools.workspace import WorkspaceTools
+from forecast_agents.templates import ZERO_CODE
 
 
 class RecordingBackend:
@@ -34,6 +36,79 @@ def response(*calls, usage=Usage(100, 1)):
 
 
 class SchedulingTests(unittest.TestCase):
+    def audited_closing_runner(self, root, backend):
+        shared = self.budget()
+        runner = self.runner(root, backend, shared, SchedulingConfig(force_tool_choice=True, max_policy_corrections=0))
+        runner.tools.execute("write_file", {"path": "solution/pipeline.py", "content": ZERO_CODE})
+        digest = freeze_solution(root / "solution", root / "snapshot")
+        runner.tools.last_validation_hash = runner.tools.last_audit_hash = digest
+        # Reproduce the historical audit-end ledger: only 7,281 role tokens left.
+        stage = runner.allowance("auditing")
+        stage.total_tokens, shared.total_tokens = 142719, 459015
+        stage.last_input_tokens, stage.last_context_chars = 9422, 32000
+        stage.llm_calls, shared.llm_calls = 15, 53
+        stage.finalizing = True
+        runner.histories["auditing"] = [Message("system", "Audit current code and report limitations."),
+            Message("user", "Review candidate"),
+            Message("assistant", tool_calls=(ToolCall("page", "read_file", {"path": "solution/pipeline.py"}),)),
+            Message("tool", json.dumps({"text": "OLD_SOURCE_SENTINEL" * 1500, "truncated": True,
+                                         "next_offset": 8000}), tool_call_id="page")]
+        return runner, shared
+
+    def test_audited_closing_uses_small_context_and_explicit_finish_within_same_budget(self):
+        with tempfile.TemporaryDirectory() as directory:
+            backend = RecordingBackend([response(finish(), usage=Usage(500, 100))])
+            runner, shared = self.audited_closing_runner(Path(directory), backend)
+            stage = runner.allowance("auditing")
+            self.assertGreater(stage.estimate_input(32000, 1000), stage.remaining_tokens)
+            result = runner.run_stage("auditing", [])
+            self.assertEqual(result["status"], "completed")
+            request = backend.requests[0]
+            self.assertEqual(request.tool_choice, "finish_stage")
+            self.assertEqual({t["name"] for t in request.tools}, {"finish_stage"})
+            self.assertNotIn("OLD_SOURCE_SENTINEL", "".join(m.text for m in request.messages))
+            self.assertIn("Partial source pages", "".join(m.text for m in request.messages))
+            self.assertLess(sum(len(m.text) for m in request.messages), 8000)
+            self.assertEqual(stage.total_tokens, 142719 + 600)
+            self.assertEqual(shared.total_tokens, 459015 + 600)
+            self.assertEqual(stage.llm_calls, 16)
+            self.assertEqual(shared.tool_calls, 1)
+            self.assertEqual(stage.limits.max_total_tokens, 150000)
+
+    def test_audited_compact_context_never_treats_plain_text_as_submission(self):
+        with tempfile.TemporaryDirectory() as directory:
+            backend = RecordingBackend([ModelResponse(Message("assistant", "Done"), "end", Usage(100, 1))])
+            runner, shared = self.audited_closing_runner(Path(directory), backend)
+            with self.assertRaisesRegex(StageBudgetExceeded, "without finish_stage"):
+                runner.run_stage("auditing", [])
+            self.assertEqual(shared.tool_calls, 0)
+            events = [json.loads(l) for l in runner.events.path.read_text().splitlines()]
+            self.assertFalse(any(e["event"] == "stage_finished" for e in events))
+
+    def test_compact_finalization_still_rechecks_source_hash_at_submission(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            class MutatingBackend(RecordingBackend):
+                def generate(self, request):
+                    (root / "solution/pipeline.py").write_text("# changed after evidence\n")
+                    return super().generate(request)
+            backend = MutatingBackend([response(finish())])
+            runner, shared = self.audited_closing_runner(root, backend)
+            with self.assertRaisesRegex(StageBudgetExceeded, "Final completion requires audit_candidate"):
+                runner.run_stage("auditing", [])
+            self.assertFalse(runner.tools.audit_is_current())
+            events = [json.loads(l) for l in runner.events.path.read_text().splitlines()]
+            self.assertFalse(any(e["event"] == "stage_finished" for e in events))
+
+    def test_compact_finalization_does_not_waive_observed_token_limits(self):
+        with tempfile.TemporaryDirectory() as directory:
+            backend = RecordingBackend([response(finish(), usage=Usage(8000, 0))])
+            runner, shared = self.audited_closing_runner(Path(directory), backend)
+            with self.assertRaisesRegex(StageBudgetExceeded, "observed token allowance"):
+                runner.run_stage("auditing", [])
+            self.assertEqual(shared.total_tokens, 459015 + 8000)
+            self.assertEqual(shared.tool_calls, 0)
+
     def budget(self, clock=None):
         limits = BudgetLimits(max_llm_calls=80, max_total_tokens=600000,
                               max_tool_calls=240, wall_seconds=1800)

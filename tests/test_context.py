@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from forecast_agents.agents.context import request_context, working_state
+from forecast_agents.agents.context import finalization_context, request_context, working_state
 from forecast_agents.llm.types import Message, ToolCall
 from forecast_agents.runtime.budget import Budget, BudgetLimits
 from forecast_agents.runtime.events import EventLog
@@ -12,6 +12,26 @@ from forecast_agents.tools.workspace import WorkspaceTools
 
 
 class ContextTests(unittest.TestCase):
+    def test_failed_page_read_keeps_safe_feedback_and_previous_successful_preview(self):
+        history = [Message("system", "Instructions"), Message("user", "Task"),
+                   Message("assistant", tool_calls=(ToolCall("ok", "read_file", {"path": "solution/pipeline.py"}),)),
+                   Message("tool", json.dumps({"text": "AUTHORED_SOURCE_SENTINEL", "truncated": True,
+                                                "next_offset": 8000}), tool_call_id="ok"),
+                   Message("assistant", tool_calls=(ToolCall("bad", "read_file", {"path": "solution/pipeline.py",
+                                                                                             "offset": 8000, "max_chars": 12000}),)),
+                   Message("tool", json.dumps({"is_error": True, "error": "max_chars must be <= 8000; use next_offset"}), tool_call_id="bad")]
+        state = working_state(history)
+        self.assertTrue(state["recent_file_reads"][0]["is_error"])
+        self.assertIn("8000", state["recent_file_reads"][0]["error"])
+        self.assertEqual(state["cached_file_previews"][0]["text"], "AUTHORED_SOURCE_SENTINEL")
+        view, info = finalization_context(history, Message("system", "Budget"), "checked-hash")
+        text = "".join(m.text for m in view)
+        self.assertNotIn("AUTHORED_SOURCE_SENTINEL", text)
+        self.assertIn('"truncated": true', text)
+        self.assertIn("Partial source pages", text)
+        self.assertIn("checked-hash", text)
+        self.assertTrue(info["finalization_only"])
+
     def test_failed_revalidation_replaces_stale_success_in_compacted_memory(self):
         history = [Message("system", "Instructions"), Message("user", "Task")]
         for call_id, name, result in (

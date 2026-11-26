@@ -26,9 +26,11 @@ TOOL_DEFINITIONS = (
     _schema("read_validation_summary", "Read the latest controller-produced aggregate validation metrics, without prediction rows.", {}, []),
     _schema("audit_candidate", "Audit a complete validated pipeline plus features, not features alone. Requires solution/pipeline.py and features.py:features_at(history, origin). Feature-only stages should use local helper tests. Returns aggregate pass/evidence only.", {}, []),
     _schema("list_files", "List relative workspace files.", {}, []),
-    _schema("read_file", "Read a text-file preview with optional character offset/max_chars. "
+    _schema("read_file", "Read a text-file preview: offset >= 0 and max_chars from 1 to 8000. "
+            "Follow next_offset for subsequent pages; offsets count characters, not lines. "
             "Data previews are capped at 1000 characters; analyze full data using a Python script.",
-            {"path": STRING, "offset": {"type": "integer"}, "max_chars": {"type": "integer"}}, ["path"]),
+            {"path": STRING, "offset": {"type": "integer", "minimum": 0},
+             "max_chars": {"type": "integer", "minimum": 1, "maximum": 8000}}, ["path"]),
     _schema("write_file", "Create or replace a workspace text file; data/ is read-only.",
             {"path": STRING, "content": STRING}, ["path", "content"]),
     _schema("run_python", "Run a workspace Python script with a bounded deadline.", {"path": STRING}, ["path"]),
@@ -55,6 +57,11 @@ def validate_arguments(value, schema):
         raise ValueError(f"Expected {kind}")
     if "enum" in schema and value not in schema["enum"]:
         raise ValueError("Unsupported enum value")
+    if kind == "integer" and (("minimum" in schema and value < schema["minimum"])
+                              or ("maximum" in schema and value > schema["maximum"])):
+        # These bounds apply to read_file only. Never echo attempted values or paths.
+        raise DataAccessError("read_file requires offset >= 0 and 1 <= max_chars <= 8000. "
+                              "Use the returned next_offset to read another page; offsets count characters, not lines.")
     if kind == "object":
         if not set(schema.get("required", ())).issubset(value):
             raise ValueError("Missing required tool arguments")
@@ -87,7 +94,7 @@ class WorkspaceTools:
         self.last_validation_summary = None
         if summaries_only:
             descriptions = {
-                "read_file": "Read only original task/contract text or unchanged files written by the agent. Raw data and runtime reports are blocked; use describe_data/read_validation_summary.",
+                "read_file": "Read only original task/contract text or unchanged agent-written files. offset >= 0, max_chars 1..8000; follow next_offset for pages (character offsets, not line numbers). Raw data/reports are blocked; use describe_data/read_validation_summary.",
                 "run_python": "Execute local Python against local data. Returns status and sanitized error type/line only; stdout/stderr and reports stay local. Use write_file for source edits.",
                 "list_files": "List known task paths and agent-written paths only; runtime-created names are withheld.",
             }
@@ -158,7 +165,7 @@ class WorkspaceTools:
             path = self.path(arguments["path"])
             offset, limit = arguments.get("offset", 0), arguments.get("max_chars", 8000)
             if offset < 0 or not 1 <= limit <= 8000:
-                raise ValueError("offset must be nonnegative; max_chars must be between 1 and 8000")
+                raise DataAccessError("read_file requires offset >= 0 and 1 <= max_chars <= 8000. Use next_offset for subsequent pages.")
             if self.summaries_only:
                 relative = path.relative_to(self.root).as_posix()
                 if relative in self.trusted_inputs:

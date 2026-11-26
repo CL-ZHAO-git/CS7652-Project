@@ -19,7 +19,7 @@ def working_state(history):
     This is deterministic extraction of existing observations, not a generated
     claim that a stage passed. Successes and failures remain distinguishable.
     """
-    cache, executions, writes = {}, {}, []
+    cache, executions, writes, reads = {}, {}, [], {}
     pending = {}
     revision = 0
     validation = None
@@ -38,6 +38,8 @@ def working_state(history):
         if result.get("policy_blocked"):
             continue
         path = call.arguments.get("path", "")
+        if not isinstance(path, str):
+            path = ""
         if call.name == "write_file" and result.get("written") == path:
             # Writing a report after a check must not make that check appear stale.
             # Track observed code edits and candidate-file edits conservatively.
@@ -50,7 +52,14 @@ def working_state(history):
                 content = call.arguments["content"]
                 cache[(path, 0)] = {"path": path, "offset": 0, "text": content[:8000],
                                     "truncated": len(content) > 8000, "source": "successful_write"}
-        elif call.name == "read_file" and not result.get("is_error") and "text" in result:
+        elif call.name == "read_file":
+            reads.pop(path, None)
+            reads[path] = {"path": path, "offset": call.arguments.get("offset", 0),
+                           "requested_max_chars": call.arguments.get("max_chars", 8000),
+                           "is_error": bool(result.get("is_error")),
+                           **{k: result[k] for k in ("error", "next_offset", "truncated") if k in result}}
+            if result.get("is_error") or "text" not in result:
+                continue
             if (path.casefold().startswith("data/") or
                     not (path.casefold().endswith(".py") or path.casefold() in PROTOCOL_FILES)):
                 continue
@@ -82,9 +91,34 @@ def working_state(history):
             "current_write_revision": revision,
             "cached_file_previews": protocol + recent,
             "recent_executions": list(executions.values())[-3:],
+            "recent_file_reads": list(reads.values())[-3:],
             "data_description": description,
             "latest_audit_result": audit,
             "latest_validation_result": validation}
+
+
+def finalization_context(history, notice, candidate_hash):
+    """Small decision-only view, used only after current-source controller checks.
+
+    Drops source text and past exchanges, never claims that the agent reviewed an
+    entire source file. Explicit finish_stage and its hash gate remain required.
+    """
+    state = working_state(history)
+    evidence = {"validated_and_fixed_audited_candidate_hash": candidate_hash,
+                "controller_checks_passed_on_current_source": True,
+                "audit_scope": "Sampled development causality, schema and repeatability; not exhaustive proof or statistical superiority",
+                "source_page_observations": [{k: page[k] for k in ("path", "offset", "truncated")}
+                                             for page in state["cached_file_previews"]
+                                             if page["path"].casefold() not in PROTOCOL_FILES],
+                "recent_file_reads": state["recent_file_reads"]}
+    message = Message("user", "Final decision only: the controller verified the unchanged validated/audited hash below. "
+                      "Call finish_stage alone, with concise evidence and limitations, or reject/request revision "
+                      "if you cannot accept the candidate. No new checks or edits are available. Partial source pages "
+                      "do not establish a full-code review; do not claim it or infer forecasting superiority. "
+                      "No final test scores are available.\n" + json.dumps(evidence))
+    view = (history[0], notice, message)
+    return view, {"context_chars": context_size(view), "finalization_only": True,
+                  "omitted_exchanges": sum(m.role == "assistant" for m in history), "cached_paths": []}
 
 
 def request_context(history, notice, max_chars):

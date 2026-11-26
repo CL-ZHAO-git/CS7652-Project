@@ -22,7 +22,7 @@ The framework supports single-agent and sequential four-role AutoML, generic LLM
 backends, shared/role budgets, local code generation, Docker execution, immutable
 candidate submissions, and chronological independent scoring. Real-data feedback
 is restricted to controller-produced summaries; raw rows and arbitrary script
-output remain local. The current regression suite passes 126 tests.
+output remain local. The current regression suite passes 132 tests.
 
 Two real DeepSeek integration pilots completed: a synthetic run and the 30-stock
 CRSP development run `runs/deepseek-crsp-dev-01/`. The latter used 44 model calls,
@@ -47,8 +47,10 @@ general advantage. The 2015–2024 final research window remains reserved.
 
 MSE and direction binary cross entropy/accuracy are now implemented. Future
 candidates must provide `prob_up`; pair 04's saved forecasts have no probabilities,
-so its MSE was backfilled but direction scores remain unavailable. No new live
-experiment was run for this addition.
+so its MSE was backfilled but direction scores remain unavailable. Pair 05 then
+ran under the probability contract: single completed, while multi passed the
+fixed audit but failed to finalize within its role allowance. That failure is
+preserved; a corrected protocol is prepared, not executed, at `runs/crsp-paired-06/`.
 
 ### Completed in This Continuation
 
@@ -281,11 +283,66 @@ the already inspected development task's 2012–2014 test scores.
 Prepared `runs/crsp-paired-05/` with the updated MSE/probability-output protocol.
 The plan contains one single/multi pair, the same CRSP development data and
 unchanged resource ceilings. Preparation verified frozen inputs and made zero
-API requests; neither arm has been executed. To obtain direction cross entropy,
-run `.venv/bin/python eval/run_comparison.py --execute-prepared runs/crsp-paired-05 --key-file key.txt`.
-Execution makes paid API requests. Pair 04 remains unchanged; do not substitute
+API requests; neither arm had been executed at preparation. It was subsequently
+executed by the user, with the outcome below. Pair 04 remains unchanged; do not substitute
 one arm across the two protocol versions. Its MSE already exists in the separate
 backfill, so rerunning is needed for new candidate probability forecasts, not MSE.
+
+### November 26, 2026: Pair 05 Pagination Loop and Final-Handoff Budget
+
+`runs/crsp-paired-05/` ended `completed_with_failures`. Single completed using
+57 calls and 524,925 tokens. Multi failed using 53 calls and 459,015 tokens;
+its audit role had used 142,719 of 150,000 tokens. This was not a global budget
+exhaustion or a candidate exception. Modeling had produced and validated a
+pipeline with direction probabilities.
+
+Auditing requested 12,000–20,000 characters on nine file reads, exceeding the
+8,000-character page limit. That limit was absent from the tool schema and
+protected-mode description, while the fixed argument error was hidden behind
+generic ValueError feedback. Changing offsets could not fix an oversized page.
+One later read was blocked by finish-only policy. The agent then called the
+fixed audit, which passed on unchanged validated hash
+`95782c8d3f8d2991df011e743aa73e95aacf91019d64ce3da6ca931e09b34761`.
+The final explicit handoff never happened: only 7,281 role tokens remained,
+and admission still estimated the next input from the previous 9,422-token
+prompt. No further request was sent. This combines a tool-feedback deficiency,
+repeated invalid agent calls, and an unaffordable final-handoff context.
+
+The fix publishes integer bounds in both read schemas/descriptions and returns
+a controlled, actionable range error with character-offset/next_offset guidance.
+Working memory retains read failures and paging metadata without discarding
+previous successful source previews. Raw data/runtime reports remain blocked.
+
+For finish-only single/auditing roles whose current source has passed validation
+and fixed audit, the final request now offers only finish_stage and a compact
+controller-evidence view. It records partial source reads without claiming full
+code review, and allows acceptance, rejection or revision. The admission estimate
+accounts for the intentionally smaller prompt; actual usage, all original caps,
+explicit agent submission and the final hash recheck remain enforced. It does
+not reopen editing, borrow another role's budget, waive auditing or automatically
+complete a run. This policy applies to both conditions in subsequent experiments.
+
+All **132 tests pass**, including pagination recovery with protected data still
+blocked, retained read-error memory, finalization from the historical 7,281-token
+ledger, no plain-text auto-submission, stale-source rejection, and observed-token
+overrun rejection. An offline replay of pair 05's audit history produced a
+5,760-character final context with estimated input 3,192 tokens plus 1,024 output
+reserve. This fits the old remaining allowance by estimate only; no API request
+or live candidate code was executed during this check.
+
+Single's completed test MAE improved over zero by about 0.022%/0.226%/0.304%
+for 1/3/5 sessions. Direction BCE was 0.692761/0.687979/0.686775 against 0.693147;
+accuracy was 52.43%/56.34%/58.23%. The 3/5-session classifier predicted up on every
+row, matching always-up accuracy. The 0.5 baseline predicts up at the documented
+tie threshold, so it must not be interpreted as 50% accuracy. No significance
+or general predictive edge is established; there is no final multi score.
+
+Keep the full failed pair and its spent resources, with aggregate review in
+`runs/crsp-paired-05/failure_review.json`. Prepared `runs/crsp-paired-06/` with
+unchanged data/global/role budgets and zero API calls. It is unexecuted; a new
+paid comparison must run both arms under this updated protocol. Do not replace
+only the failed multi condition or treat the offline replay as a completed run.
+The reserved 2015–2024 final research window remains untouched.
 
 ## Agreed Research Design
 

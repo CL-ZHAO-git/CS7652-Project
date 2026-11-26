@@ -112,10 +112,15 @@ class StageAllowance:
                 or self.elapsed_seconds >= self.limits.wall_seconds * cfg.finish_only_fraction)
         return self.finalizing
 
-    def estimate_input(self, context_chars, tool_chars):
+    def estimate_input(self, context_chars, tool_chars, compact_finalization=False):
         # Admission estimate only: providers report exact usage after generation.
         # Anchor to this role's last prompt usage and account for context growth.
-        if self.last_input_tokens is None:
+        if compact_finalization and self.last_input_tokens is not None and self.last_context_chars:
+            # A deliberately rebuilt decision-only prompt excludes the large old
+            # context. Scale its empirical density, with an independent floor.
+            estimate = max(math.ceil((context_chars + tool_chars) / 3),
+                           math.ceil(self.last_input_tokens * context_chars / self.last_context_chars))
+        elif self.last_input_tokens is None:
             estimate = math.ceil((context_chars + tool_chars) / 3)
         else:
             estimate = self.last_input_tokens + max(0, math.ceil((context_chars - self.last_context_chars) / 3))

@@ -145,9 +145,18 @@ handoff is required; incomplete checks are never automatically accepted. A revis
 target that is already finish-only is rejected immediately: revisiting it cannot
 reopen code editing or reset its counters.
 
+Once a finish-only `auditing`/`single` role has passed validation and the fixed
+audit on the current source, only `finish_stage` is offered. Its final request
+uses a small controller-evidence context instead of source previews and old
+tool exchanges. It identifies partial source reads explicitly and does not
+claim a complete code review. Input admission scales the previous observed
+token density for this compact view; actual usage is still charged against the
+same role/global limits. The agent must explicitly finish, reject or request
+revision. Source hashes are checked again before accepting completion.
+
 For endpoints that support it, `scheduling.force_tool_choice = true` also sets the
-provider's API-level tool choice. Closing diagnosis/features must call
-`finish_stage`; other closing roles must call an offered tool. After a correction,
+provider's API-level tool choice. Closing diagnosis/features and already-audited
+final roles must call `finish_stage`; other closing roles must call an offered tool. After a correction,
 their essential validation/audit tools remain available. The default is false
 for provider portability.
 The DeepSeek profile explicitly enables it with thinking disabled, as required by
@@ -186,7 +195,8 @@ Report writes outside `solution/` do not invalidate source-check evidence. Cache
 pages are observations, so agents must re-read if a script itself changed source.
 The current handoff and latest exchange, including native reasoning state, remain
 intact; a large latest exchange can exceed the target, which is logged explicitly.
-This is not an exact provider-token limit. Full controller histories and original
+The final decision-only view described above is an exception to normal exchange
+retention; original histories remain recorded. This is not an exact provider-token limit. Full controller histories and original
 events are retained; this policy also applies to single-agent mode.
 
 For synthetic experiments, `read_file` previews at most 8,000 characters of source
@@ -416,10 +426,14 @@ stay unchanged, and failed conditions retain missing metrics. This workspace's
 `metrics_v2.json` already contains the MSE backfill; original pair 04 has no saved
 probabilities, so its candidate cross entropy remains unavailable. New live pairs
 need a new frozen plan under the updated probability-output contract.
-The next local plan is prepared at `runs/crsp-paired-05/` (one single/multi pair;
-zero API calls during preparation). Execute it with
-`.venv/bin/python eval/run_comparison.py --execute-prepared runs/crsp-paired-05 --key-file key.txt`.
-Execution makes paid requests; the plan has not yet been run.
+Pair 05 was executed: single completed, while multi passed its fixed audit but
+failed to finalize after repeated oversized file reads exhausted its role's
+affordable-input allowance. Its failure is preserved. The next local plan is
+prepared at `runs/crsp-paired-06/`, with public pagination bounds and compact final
+handoffs (one single/multi pair; zero API calls during preparation). Execute it
+with `.venv/bin/python eval/run_comparison.py --execute-prepared runs/crsp-paired-06 --key-file key.txt`.
+Execution makes paid requests; plan 06 has not yet been run. Both arms must use
+the new protocol; do not substitute only the failed condition from plan 05.
 
 Abstention excludes a row from served-error metrics. Fallback replaces the served
 prediction with zero. Compare `raw` against `zero_baseline` on all requested rows,
@@ -475,6 +489,9 @@ receives the following controlled feedback:
   diagnostics, including the failed operation; raw tracebacks stay local. Compacted
   memory replaces earlier successful validation/audit records with the latest failure.
 - `read_file`: original task/contract snapshots or unchanged agent-written files.
+  Reads use character offsets, `offset >= 0` and `1 <= max_chars <= 8000`.
+  Follow `next_offset` for further pages. Bounds are included in the tool schema
+  and protected-mode errors; failed read feedback is retained in working memory.
   Raw data, runtime-produced reports, and files modified by executed scripts are
   blocked. Apply source edits through `write_file`, not patch scripts. File lists
   include only known inputs and agent-written paths, not arbitrary runtime filenames.
